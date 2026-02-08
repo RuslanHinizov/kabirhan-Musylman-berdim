@@ -14,6 +14,9 @@ dist-ssr/
 *.pt
 models/
 
+# But keep our trained classifier
+!models/color_classifier.pt
+
 # Video & image data
 data/
 results/
