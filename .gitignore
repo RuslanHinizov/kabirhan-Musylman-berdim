@@ -1,0 +1,49 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+.vite/
+
+# Models (large binary files)
+*.pt
+models/
+
+# Video & image data
+data/
+results/
+*.mp4
+reid_crops/
+runs/
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS
+.DS_Store
+Thumbs.db
+nul
+
+# Logs
+*.log
+npm-debug.log*
+
+# Claude Code
+.claude/
+
+# Misc
+*.local
+.gitmodules
+.agent/
+eslint-output.json
