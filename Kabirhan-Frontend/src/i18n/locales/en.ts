@@ -108,4 +108,90 @@ export const en = {
         home: 'Home',
         selectCamera: 'Select Camera',
     },
+
+    // Camera Grid
+    cameraGrid: {
+        analyticsCameras: 'Analytics Cameras',
+        cameraCount: 'cameras — YOLO + CNN detection (not shown to viewers)',
+        horseDetected: 'horse detected',
+        horsesDetected: 'horses detected',
+        online: 'Online',
+        offline: 'Offline',
+        horseDetectedLegend: 'Horse Detected',
+    },
+
+    // Camera Settings
+    cameraSettings: {
+        title: 'Camera Configuration',
+        description: 'Manage RTSP camera streams',
+        ptzBroadcast: 'PTZ Cameras (Broadcast)',
+        analyticsDetection: 'Analytics Cameras (Detection)',
+        active: 'active',
+        backendServer: 'Backend Server',
+        rtspPlaceholder: 'rtsp://username:password@ip:port/stream',
+        save: 'Save',
+        stopStream: 'Stop Stream',
+        startStream: 'Start Stream',
+    },
+
+    // PTZ Control Panel
+    ptzPanel: {
+        title: 'PTZ Camera Control',
+        description: 'Select the active broadcast camera for public display',
+        onAir: 'ON AIR',
+        online: 'Online',
+        offline: 'Offline',
+        position: 'Position',
+        keyboardTip: 'Tip: Press 1-{{count}} to switch cameras quickly',
+    },
+
+    // Race Settings Page
+    raceSettings: {
+        title: 'Race Settings',
+        description: 'Configure race parameters and horses',
+        raceConfiguration: 'Race Configuration',
+        raceName: 'Race Name',
+        totalLaps: 'Total Laps',
+        startFinishPosition: 'Start/Finish Position',
+        raceControls: 'Race Controls',
+        startRace: 'Start Race',
+        stopRace: 'Stop Race',
+        reset: 'Reset',
+        status: 'Status',
+        ready: 'Ready',
+        racing: 'Racing',
+        finished: 'Finished',
+        settings: 'Settings',
+        saveSettings: 'Save Settings',
+        horses: 'Horses',
+        addHorse: 'Add Horse',
+        horseName: 'Horse Name',
+        jockeyName: 'Jockey Name',
+        colorOverride: 'Color Override',
+        removeHorse: 'Remove Horse',
+        noHorses: 'No horses added yet. Click "Add Horse" to start.',
+    },
+
+    // PTZ Camera Display
+    ptzDisplay: {
+        noCameraFeed: 'No Camera Feed',
+        live: 'LIVE',
+        hd: 'HD',
+        race: 'Race',
+        defaultRaceName: 'Grand Championship',
+    },
+
+    // Ranking Board
+    ranking: {
+        liveStandings: 'Live Standings',
+        leader: 'Leader:',
+    },
+
+    // Stream Players
+    stream: {
+        connectingWebRTC: 'Connecting via WebRTC...',
+        connectingStream: 'Connecting to stream...',
+        streamOffline: 'Stream Offline',
+        webrtcLabel: 'WebRTC',
+    },
 };

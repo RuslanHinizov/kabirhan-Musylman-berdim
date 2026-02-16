@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Camera, Play, Square, Save, RefreshCw } from 'lucide-react';
 import { PTZ_CAMERAS, ANALYTICS_CAMERAS } from '../../config/cameras';
+import { BACKEND_HTTP_URL } from '../../config/backend';
 
 // Local type for camera row data
 type CameraData = {
@@ -30,6 +32,7 @@ const CameraRow = ({
     onStopStream: (id: string) => void;
     onSave: (id: string, url: string, type: 'ptz' | 'analytics') => void;
 }) => {
+    const { t } = useTranslation();
     const [localUrl, setLocalUrl] = useState(camera.rtspUrl);
     const [isEditing, setIsEditing] = useState(false);
 
@@ -63,7 +66,7 @@ const CameraRow = ({
                         setIsEditing(true);
                     }}
                     className="w-full text-xs py-1.5 font-mono bg-[#1a1a2e] border border-[#333] rounded px-2 text-white focus:border-blue-500 focus:outline-none"
-                    placeholder="rtsp://username:password@ip:port/stream"
+                    placeholder={t('cameraSettings.rtspPlaceholder')}
                 />
             </div>
 
@@ -72,7 +75,7 @@ const CameraRow = ({
                     <button
                         onClick={handleSave}
                         className="p-2 text-[var(--accent)] hover:bg-[var(--accent)]/10 rounded transition-colors cursor-pointer"
-                        title="Save"
+                        title={t('cameraSettings.save')}
                     >
                         <Save className="w-4 h-4" />
                     </button>
@@ -83,7 +86,7 @@ const CameraRow = ({
                         onClick={() => onStopStream(camera.id)}
                         disabled={isLoading}
                         className="p-2 text-[var(--danger)] hover:bg-[var(--danger)]/10 rounded transition-colors cursor-pointer disabled:opacity-50"
-                        title="Stop Stream"
+                        title={t('cameraSettings.stopStream')}
                     >
                         {isLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Square className="w-4 h-4" />}
                     </button>
@@ -92,7 +95,7 @@ const CameraRow = ({
                         onClick={() => onStartStream(camera.id)}
                         disabled={isLoading}
                         className="p-2 text-[var(--accent)] hover:bg-[var(--accent)]/10 rounded transition-colors cursor-pointer disabled:opacity-50"
-                        title="Start Stream"
+                        title={t('cameraSettings.startStream')}
                     >
                         {isLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
                     </button>
@@ -102,71 +105,142 @@ const CameraRow = ({
     );
 };
 
+const STORAGE_KEY = 'race-vision-camera-urls';
+const SYNC_ONCE_KEY = 'race-vision-camera-sync-done-v1';
+
+const getSavedUrls = (): Record<string, string> => {
+    try {
+        return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    } catch {
+        return {};
+    }
+};
+
 export const CameraSettings = () => {
+    const { t } = useTranslation();
+    const savedUrls = getSavedUrls();
     const [ptzCameras, setPtzCameras] = useState<CameraData[]>(
-        PTZ_CAMERAS.map(c => ({ ...c, type: 'ptz' as const, status: c.status }))
+        PTZ_CAMERAS.map(c => ({ ...c, type: 'ptz' as const, status: c.status, rtspUrl: savedUrls[c.id] || c.rtspUrl }))
     );
     const [analyticsCameras, setAnalyticsCameras] = useState<CameraData[]>(
-        ANALYTICS_CAMERAS.map(c => ({ ...c, type: 'analytics' as const, status: c.status }))
+        ANALYTICS_CAMERAS.map(c => ({ ...c, type: 'analytics' as const, status: c.status, rtspUrl: savedUrls[c.id] || c.rtspUrl }))
     );
     const [streamStatus, setStreamStatus] = useState<Record<string, boolean>>({});
     const [loading, setLoading] = useState<Record<string, boolean>>({});
 
-    // Fetch stream status
-    const fetchStreamStatus = async () => {
+    // Fetch raw stream states from backend: { camId: "running" | "connecting" | ... }
+    const fetchStreamStates = useCallback(async (): Promise<Record<string, string>> => {
         try {
-            const response = await fetch('http://localhost:8000/api/streams/status');
-            const status = await response.json();
-            const activeIds: Record<string, boolean> = {};
+            const response = await fetch(`${BACKEND_HTTP_URL}/api/streams/status`);
+            const status = await response.json() as Record<string, { state?: string }>;
+            const states: Record<string, string> = {};
             Object.keys(status).forEach(id => {
-                activeIds[id] = true;
+                states[id] = status[id]?.state || 'idle';
             });
-            setStreamStatus(activeIds);
+            return states;
         } catch {
-            // Silent fail - stream server not available
+            return {};
         }
-    };
-
-    useEffect(() => {
-        fetchStreamStatus();
-        const interval = setInterval(fetchStreamStatus, 10000);
-        return () => clearInterval(interval);
     }, []);
 
-    // Start stream
+    // Fetch stream status
+    const fetchStreamStatus = useCallback(async () => {
+        const states = await fetchStreamStates();
+        const activeIds: Record<string, boolean> = {};
+        Object.entries(states).forEach(([id, state]) => {
+            // Treat connecting as active to avoid duplicate start clicks/restarts.
+            if (state === 'running' || state === 'connecting') {
+                activeIds[id] = true;
+            }
+        });
+        setStreamStatus(activeIds);
+    }, [fetchStreamStates]);
+
+    // On mount: always sync saved URLs to backend.
+    // Sync once per tab session to avoid repetitive PUT storms in logs.
+    useEffect(() => {
+        const syncUrlsToBackend = async () => {
+            const saved = getSavedUrls();
+            const promises = Object.entries(saved).map(([camId, url]) => {
+                if (!url) return Promise.resolve();
+                return fetch(`${BACKEND_HTTP_URL}/api/cameras/${camId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ rtspUrl: url })
+                }).catch(() => {}); // silent fail
+            });
+            await Promise.all(promises);
+        };
+
+        const initialize = async () => {
+            const syncDone = sessionStorage.getItem(SYNC_ONCE_KEY) === '1';
+            if (!syncDone) {
+                await syncUrlsToBackend();
+                sessionStorage.setItem(SYNC_ONCE_KEY, '1');
+            }
+
+            await fetchStreamStatus();
+        };
+
+        initialize();
+        const interval = setInterval(fetchStreamStatus, 10000);
+        return () => clearInterval(interval);
+    }, [fetchStreamStates, fetchStreamStatus]);
+
+    // Start stream — ensures URL is sent to backend first, then starts
     const startStream = useCallback(async (cameraId: string) => {
         setLoading(prev => ({ ...prev, [cameraId]: true }));
         try {
-            await fetch(`http://localhost:8000/api/cameras/${cameraId}/start`, { method: 'POST' });
+            // Ensure backend has the URL (may have been lost on restart)
+            const saved = getSavedUrls();
+            const url = saved[cameraId];
+            if (url) {
+                await fetch(`${BACKEND_HTTP_URL}/api/cameras/${cameraId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ rtspUrl: url })
+                });
+            }
+            await fetch(`${BACKEND_HTTP_URL}/api/cameras/${cameraId}/start`, { method: 'POST' });
             await fetchStreamStatus();
         } catch (error) {
             console.error('Failed to start stream:', error);
         }
         setLoading(prev => ({ ...prev, [cameraId]: false }));
-    }, []);
+    }, [fetchStreamStatus]);
 
     // Stop stream
     const stopStream = useCallback(async (cameraId: string) => {
         setLoading(prev => ({ ...prev, [cameraId]: true }));
         try {
-            await fetch(`http://localhost:8000/api/cameras/${cameraId}/stop`, { method: 'POST' });
+            await fetch(`${BACKEND_HTTP_URL}/api/cameras/${cameraId}/stop`, { method: 'POST' });
             await fetchStreamStatus();
         } catch (error) {
             console.error('Failed to stop stream:', error);
         }
         setLoading(prev => ({ ...prev, [cameraId]: false }));
-    }, []);
+    }, [fetchStreamStatus]);
 
     // Save camera URL
     const saveCamera = useCallback(async (cameraId: string, url: string, type: 'ptz' | 'analytics') => {
+        // Persist to localStorage
         try {
-            await fetch(`http://localhost:8000/api/cameras/${cameraId}`, {
+            const saved = getSavedUrls();
+            saved[cameraId] = url;
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
+        } catch {
+            // localStorage may fail in private browsing
+        }
+
+        // Send to backend
+        try {
+            await fetch(`${BACKEND_HTTP_URL}/api/cameras/${cameraId}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ rtspUrl: url })
             });
         } catch {
-            // Continue even if server not available - save locally
+            // Continue even if server not available - saved locally
         }
 
         if (type === 'ptz') {
@@ -179,8 +253,8 @@ export const CameraSettings = () => {
     return (
         <div className="p-6 h-full overflow-y-auto">
             <div className="mb-6">
-                <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-1">Camera Configuration</h2>
-                <p className="text-sm text-[var(--text-muted)]">Manage RTSP camera streams</p>
+                <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-1">{t('cameraSettings.title')}</h2>
+                <p className="text-sm text-[var(--text-muted)]">{t('cameraSettings.description')}</p>
             </div>
 
             <div className="grid grid-cols-2 gap-6">
@@ -188,10 +262,10 @@ export const CameraSettings = () => {
                     <div className="flex items-center justify-between mb-4">
                         <h3 className="text-sm font-medium text-[var(--text-primary)] flex items-center gap-2">
                             <Camera className="w-4 h-4 text-[var(--primary)]" />
-                            PTZ Cameras (Broadcast)
+                            {t('cameraSettings.ptzBroadcast')}
                         </h3>
                         <span className="text-xs text-[var(--text-muted)]">
-                            {Object.keys(streamStatus).filter(id => id.startsWith('ptz')).length} / {ptzCameras.length} active
+                            {Object.keys(streamStatus).filter(id => id.startsWith('ptz')).length} / {ptzCameras.length} {t('cameraSettings.active')}
                         </span>
                     </div>
 
@@ -214,10 +288,10 @@ export const CameraSettings = () => {
                     <div className="flex items-center justify-between mb-4">
                         <h3 className="text-sm font-medium text-[var(--text-primary)] flex items-center gap-2">
                             <Camera className="w-4 h-4 text-[var(--warning)]" />
-                            Analytics Cameras (Detection)
+                            {t('cameraSettings.analyticsDetection')}
                         </h3>
                         <span className="text-xs text-[var(--text-muted)]">
-                            {Object.keys(streamStatus).filter(id => id.startsWith('analytics')).length} / {analyticsCameras.length} active
+                            {Object.keys(streamStatus).filter(id => id.startsWith('analytics')).length} / {analyticsCameras.length} {t('cameraSettings.active')}
                         </span>
                     </div>
 
@@ -238,9 +312,9 @@ export const CameraSettings = () => {
             </div>
 
             <div className="mt-6 racing-card p-4">
-                <h4 className="text-sm font-medium text-[var(--text-primary)] mb-2">Backend Server</h4>
+                <h4 className="text-sm font-medium text-[var(--text-primary)] mb-2">{t('cameraSettings.backendServer')}</h4>
                 <div className="text-xs text-[var(--text-muted)] space-y-1">
-                    <p>Backend: <code className="text-[var(--text-secondary)]">http://localhost:8000</code></p>
+                    <p>Backend: <code className="text-[var(--text-secondary)]">{BACKEND_HTTP_URL}</code></p>
                     <p>Run: <code className="text-[var(--text-secondary)]">python api/server.py --video data/videos/exp10_cam1.mp4 --auto-start</code></p>
                 </div>
             </div>

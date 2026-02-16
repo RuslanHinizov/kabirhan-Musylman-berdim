@@ -4,7 +4,8 @@ import {
     TRACK_LENGTH,
     HORSE_COLORS,
     HORSE_NAMES,
-    JOCKEY_NAMES
+    JOCKEY_NAMES,
+    MAX_HORSES
 } from '../types';
 import { getDefaultSilkId, getSilkColor } from '../utils/silkUtils';
 
@@ -17,7 +18,14 @@ interface RaceState {
 
     // Actions
     setRace: (race: Partial<RaceConfig>) => void;
-    setRaceConfig: (config: { name?: string; totalLaps?: number; trackLength?: number }) => void;
+    setRaceConfig: (config: {
+        name?: string;
+        totalLaps?: number;
+        trackLength?: number;
+        startFinishPosition?: number;
+        status?: RaceConfig['status'];
+    }) => void;
+    setHorses: (horses: Horse[]) => void;
     addHorse: (horse: Partial<Horse> & { id: string; number: number }) => void;
     removeHorse: (horseId: string) => void;
     updateHorse: (horseId: string, updates: Partial<Horse>) => void;
@@ -80,13 +88,24 @@ export const useRaceStore = create<RaceState>((set, get) => ({
         race: { ...state.race, ...raceUpdate }
     })),
 
-    setRaceConfig: (config) => set((state) => ({
-        race: {
-            ...state.race,
-            name: config.name ?? state.race.name,
-            totalLaps: config.totalLaps ?? state.race.totalLaps,
-            trackLength: config.trackLength ?? state.race.trackLength,
-        }
+    setRaceConfig: (config) => set((state) => {
+        const nextStatus = config.status ?? state.race.status;
+        return {
+            race: {
+                ...state.race,
+                name: config.name ?? state.race.name,
+                totalLaps: config.totalLaps ?? state.race.totalLaps,
+                trackLength: config.trackLength ?? state.race.trackLength,
+                startFinishPosition: config.startFinishPosition ?? state.race.startFinishPosition,
+                status: nextStatus,
+            },
+            isSimulationRunning: nextStatus === 'active',
+        };
+    }),
+
+    setHorses: (horses) => set((state) => ({
+        horses,
+        race: { ...state.race, horses }
     })),
 
     addHorse: (horseData) => set((state) => {
@@ -107,16 +126,22 @@ export const useRaceStore = create<RaceState>((set, get) => ({
             silkId: silkId,
             silkColor: horseData.silkColor || getSilkColor(silkId),
         };
+        const nextHorses = [...state.horses, horse];
         return {
-            horses: [...state.horses, horse],
-            rankings: [...state.horses, horse].sort((a, b) => a.currentPosition - b.currentPosition)
+            horses: nextHorses,
+            race: { ...state.race, horses: nextHorses },
+            rankings: [...nextHorses].sort((a, b) => a.currentPosition - b.currentPosition)
         };
     }),
 
-    removeHorse: (horseId) => set((state) => ({
-        horses: state.horses.filter(h => h.id !== horseId),
-        rankings: state.rankings.filter(h => h.id !== horseId)
-    })),
+    removeHorse: (horseId) => set((state) => {
+        const nextHorses = state.horses.filter(h => h.id !== horseId);
+        return {
+            horses: nextHorses,
+            race: { ...state.race, horses: nextHorses },
+            rankings: state.rankings.filter(h => h.id !== horseId)
+        };
+    }),
 
     updateHorse: (horseId, updates) => set((state) => {
         const newHorses = state.horses.map(h =>
@@ -124,17 +149,18 @@ export const useRaceStore = create<RaceState>((set, get) => ({
         );
         return {
             horses: newHorses,
+            race: { ...state.race, horses: newHorses },
             rankings: [...newHorses].sort((a, b) => a.currentPosition - b.currentPosition)
         };
     }),
 
     updateRankings: (horses) => set(() => ({
-        horses,
         rankings: [...horses].sort((a, b) => a.currentPosition - b.currentPosition)
     })),
 
-    clearHorses: () => set(() => ({
+    clearHorses: () => set((state) => ({
         horses: [],
+        race: { ...state.race, horses: [] },
         rankings: []
     })),
 
@@ -150,21 +176,22 @@ export const useRaceStore = create<RaceState>((set, get) => ({
 
     resetRace: () => {
         const { race } = get();
-        const newHorses = createDefaultHorses(race.horses.length || 10);
+        const defaultHorseCount = race.horses.length > 0 ? Math.min(race.horses.length, MAX_HORSES) : MAX_HORSES;
+        const newHorses = createDefaultHorses(defaultHorseCount);
         set({
             race: { ...defaultRace, horses: newHorses },
             horses: newHorses,
-            rankings: newHorses,
+            rankings: [],
             isSimulationRunning: false
         });
     },
 
     initializeDefaultRace: () => {
-        const horses = createDefaultHorses(10);
+        const horses = createDefaultHorses(MAX_HORSES);
         set({
             race: { ...defaultRace, horses },
             horses,
-            rankings: horses
+            rankings: []
         });
     },
 

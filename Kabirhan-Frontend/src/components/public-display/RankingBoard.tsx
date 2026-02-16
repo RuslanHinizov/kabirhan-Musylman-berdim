@@ -3,13 +3,15 @@ import { Timer, Flag } from 'lucide-react';
 import { useRaceStore } from '../../store/raceStore';
 import { useState, useEffect, useRef } from 'react';
 import { getSilkImagePath } from '../../utils/silkUtils';
+import { useTranslation } from 'react-i18next';
 
 export const RankingBoard = () => {
+    const { t } = useTranslation();
     const { rankings, race } = useRaceStore();
     const [previousPositions, setPreviousPositions] = useState<Record<string, number>>({});
     const prevRankingsRef = useRef(rankings);
 
-    // Top 10 atları göster
+    // Top 10 horses
     const topHorses = rankings.slice(0, 10);
 
     /* eslint-disable react-hooks/set-state-in-effect */
@@ -47,7 +49,7 @@ export const RankingBoard = () => {
             {/* Header */}
             <div className="flex-shrink-0 px-6 py-3 flex items-center justify-between border-b border-[var(--border)]">
                 <div className="flex items-center gap-6">
-                    <span className="text-sm font-medium text-[var(--text-secondary)]">Live Standings</span>
+                    <span className="text-sm font-medium text-[var(--text-secondary)]">{t('ranking.liveStandings')}</span>
 
                     <div className="flex items-center gap-2 text-sm">
                         <Flag className="w-4 h-4 text-[var(--text-muted)]" />
@@ -65,7 +67,7 @@ export const RankingBoard = () => {
 
                 {leader && (
                     <div className="flex items-center gap-2 text-sm">
-                        <span className="text-[var(--text-muted)]">Leader:</span>
+                        <span className="text-[var(--text-muted)]">{t('ranking.leader')}</span>
                         <img
                             src={getSilkImagePath(leader.silkId)}
                             alt={leader.name}

@@ -361,6 +361,7 @@ class RaceTracker:
             # Rank all colors by probability for this detection
             sorted_colors = sorted(det['prob_dict'].items(), key=lambda x: -x[1])
 
+            found = False
             for color, prob in sorted_colors:
                 if color not in used_colors and prob >= MIN_REASSIGN_CONF:
                     used_colors.add(color)
@@ -369,8 +370,15 @@ class RaceTracker:
                     new_det['color'] = color
                     new_det['conf'] = prob
                     assigned.append(new_det)
+                    found = True
                     break
-            # If no unused color found with enough confidence, skip this detection
+            if not found:
+                # Log the dropped detection so it's not silent
+                orig_color = det.get('color', '?')
+                orig_conf = det.get('conf', 0)
+                print(f"  [WARN] Dropped detection: orig={orig_color} conf={orig_conf:.2f}, "
+                      f"no unused color with prob >= {MIN_REASSIGN_CONF} "
+                      f"(used: {used_colors})")
 
         # Sort back by center_x descending (rightmost = 1st place)
         return sorted(assigned, key=lambda d: -d['center_x'])

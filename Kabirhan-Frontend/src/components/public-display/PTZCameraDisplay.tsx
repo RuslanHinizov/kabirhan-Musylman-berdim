@@ -2,26 +2,30 @@ import { Camera, Wifi, Maximize } from 'lucide-react';
 import { useCameraStore } from '../../store/cameraStore';
 import { useRaceStore } from '../../store/raceStore';
 import { MJPEGPlayer } from '../MJPEGPlayer';
+import { useTranslation } from 'react-i18next';
+import { BACKEND_HTTP_URL } from '../../config/backend';
 
 export const PTZCameraDisplay = () => {
+    const { t } = useTranslation();
     const { ptzCameras, activePTZCameraId } = useCameraStore();
     const { race } = useRaceStore();
     const activeCamera = ptzCameras.find(cam => cam.id === activePTZCameraId);
 
     return (
         <div className="relative w-full h-full bg-[var(--background)]">
-            {/* Camera Feed — use PTZ camera's mjpegUrl */}
-            {activeCamera?.mjpegUrl ? (
+            {/* Camera Feed — MJPEG (stable for rapid camera switching) */}
+            {activeCamera ? (
                 <MJPEGPlayer
-                    url={activeCamera.mjpegUrl}
+                    url={`${BACKEND_HTTP_URL}/stream/${activeCamera.id}`}
                     cameraName={activeCamera.name}
                     className="absolute inset-0 w-full h-full"
+                    objectFit="cover"
                 />
             ) : (
                 <div className="absolute inset-0 flex items-center justify-center">
                     <div className="text-center">
                         <Camera className="w-16 h-16 text-[var(--border)] mx-auto mb-4" strokeWidth={1} />
-                        <p className="text-sm text-[var(--text-muted)]">No Camera Feed</p>
+                        <p className="text-sm text-[var(--text-muted)]">{t('ptzDisplay.noCameraFeed')}</p>
                     </div>
                 </div>
             )}
@@ -35,14 +39,14 @@ export const PTZCameraDisplay = () => {
                     </span>
                 </div>
 
-                <div className="live-badge">LIVE</div>
+                <div className="live-badge">{t('ptzDisplay.live')}</div>
             </div>
 
             {/* Top Right */}
             <div className="absolute top-4 right-4 flex items-center gap-2 z-10">
                 <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-[var(--surface)] rounded-lg border border-[var(--border)]">
                     <Wifi className="w-3.5 h-3.5 text-[var(--accent)]" />
-                    <span className="text-xs text-[var(--text-secondary)]">HD</span>
+                    <span className="text-xs text-[var(--text-secondary)]">{t('ptzDisplay.hd')}</span>
                 </div>
 
                 <button className="p-1.5 bg-[var(--surface)] rounded-lg border border-[var(--border)] hover:border-[var(--text-muted)] transition-colors cursor-pointer">
@@ -53,9 +57,9 @@ export const PTZCameraDisplay = () => {
             {/* Bottom Left */}
             <div className="absolute bottom-4 left-4 z-10">
                 <div className="px-4 py-2.5 bg-[var(--surface)] rounded-lg border border-[var(--border)]">
-                    <p className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider mb-0.5">Race</p>
+                    <p className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider mb-0.5">{t('ptzDisplay.race')}</p>
                     <p className="text-sm font-medium text-[var(--text-primary)]">
-                        {race.name || 'Grand Championship'}
+                        {race.name || t('ptzDisplay.defaultRaceName')}
                     </p>
                 </div>
             </div>

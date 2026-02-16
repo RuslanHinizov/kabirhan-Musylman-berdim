@@ -1,19 +1,22 @@
-import { Camera, Check, Wifi } from 'lucide-react';
+import { Check, Wifi } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { useCameraStore } from '../../store/cameraStore';
 import { MJPEGPlayer } from '../MJPEGPlayer';
+import { BACKEND_HTTP_URL } from '../../config/backend';
 
 export const PTZControlPanel = () => {
+    const { t } = useTranslation();
     const { ptzCameras, activePTZCameraId, setActivePTZCamera } = useCameraStore();
 
     return (
         <div className="p-6 h-full">
             <div className="mb-6">
-                <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-1">PTZ Camera Control</h2>
-                <p className="text-sm text-[var(--text-muted)]">Select the active broadcast camera for public display</p>
+                <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-1">{t('ptzPanel.title')}</h2>
+                <p className="text-sm text-[var(--text-muted)]">{t('ptzPanel.description')}</p>
             </div>
 
-            {/* Grid layout based on camera count */}
-            <div className={`grid gap-4 h-[calc(100%-100px)] ${ptzCameras.length <= 3 ? 'grid-cols-3' : 'grid-cols-2'}`}>
+            {/* 2x2 layout for 4 PTZ cameras */}
+            <div className="grid grid-cols-2 gap-4 h-[calc(100%-100px)] overflow-y-auto pr-1">
                 {ptzCameras.map((camera) => {
                     const isActive = camera.id === activePTZCameraId;
 
@@ -22,18 +25,21 @@ export const PTZControlPanel = () => {
                             key={camera.id}
                             onClick={() => setActivePTZCamera(camera.id)}
                             className={`
-                relative rounded-lg cursor-pointer transition-all h-full min-h-[200px] overflow-hidden
+                relative rounded-lg cursor-pointer transition-all overflow-hidden aspect-video
                 ${isActive
-                                    ? 'ring-4 ring-[var(--primary)] border-2 border-[var(--primary)]'
+                                    ? 'ring-2 ring-inset ring-[var(--primary)] border border-[var(--primary)]'
                                     : 'bg-[var(--surface)] border border-[var(--border)] hover:border-[var(--text-muted)]'}
               `}
                         >
                             {/* Video Preview */}
                             <div className="absolute inset-0">
                                 <MJPEGPlayer
-                                    url={camera.mjpegUrl}
+                                    url={`${BACKEND_HTTP_URL}/stream/${camera.id}`}
                                     cameraName={camera.name}
                                     className="w-full h-full"
+                                    objectFit="contain"
+                                    showStatusOverlay={false}
+                                    showInfoBadge={false}
                                 />
                             </div>
 
@@ -46,7 +52,7 @@ export const PTZControlPanel = () => {
                                     {camera.name}
                                 </span>
 
-                                {isActive && <span className="live-badge">ON AIR</span>}
+                                {isActive && <span className="live-badge">{t('ptzPanel.onAir')}</span>}
                             </div>
 
                             {/* Status */}
@@ -54,7 +60,7 @@ export const PTZControlPanel = () => {
                                 <div className="bg-black/70 rounded px-2 py-1 flex items-center gap-1.5">
                                     <Wifi className={`w-4 h-4 ${camera.status === 'online' ? 'text-[var(--accent)]' : 'text-[var(--danger)]'}`} />
                                     <span className="text-xs text-white">
-                                        {camera.status === 'online' ? 'Online' : 'Offline'}
+                                        {camera.status === 'online' ? t('ptzPanel.online') : t('ptzPanel.offline')}
                                     </span>
                                 </div>
                             </div>
@@ -68,7 +74,7 @@ export const PTZControlPanel = () => {
 
                             {/* Camera position info */}
                             <div className="absolute bottom-4 left-4 text-xs bg-black/70 text-white px-2 py-1 rounded z-10">
-                                Position: {camera.position}m
+                                {t('ptzPanel.position')}: {camera.position}m
                             </div>
                         </button>
                     );
@@ -76,7 +82,7 @@ export const PTZControlPanel = () => {
             </div>
 
             <p className="mt-4 text-sm text-[var(--text-muted)]">
-                Tip: Press 1-{ptzCameras.length} to switch cameras quickly
+                {t('ptzPanel.keyboardTip', { count: ptzCameras.length })}
             </p>
         </div>
     );

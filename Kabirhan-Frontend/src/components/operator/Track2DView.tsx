@@ -105,8 +105,8 @@ export const Track2DView = () => {
         }
     };
 
-    // Inner edge (for cameras)
-    const getInnerPos = (pct: number) => getPos(pct, -trackWidth / 2 - 15);
+    // Inner edge (for cameras) - place cameras FURTHER INSIDE the track (green area)
+    const getInnerPos = (pct: number) => getPos(pct, -trackWidth / 2 - 25);
 
     // Outer edge (for distance markers)
     const getOuterPos = (pct: number) => getPos(pct, trackWidth / 2 + 30);
@@ -117,13 +117,14 @@ export const Track2DView = () => {
         return `M ${l} ${cy - r} L ${ri} ${cy - r} A ${r} ${r} 0 0 1 ${ri} ${cy + r} L ${l} ${cy + r} A ${r} ${r} 0 0 1 ${l} ${cy - r} Z`;
     };
 
-    // Analytics camera positions on track — each camera covers trackStart..trackEnd
+    // Analytics camera positions on track — each camera at its position (100m, 200m, etc.)
     const cameras = useMemo(() => {
         const detectionThreshold = 60;
 
         return analyticsCameras.map(cam => {
-            const midpoint = (cam.trackStart + cam.trackEnd) / 2;
-            const pct = midpoint / TRACK_LENGTH;
+            // Position camera at trackEnd (100, 200, 300...)
+            const position = cam.trackEnd;
+            const pct = position / TRACK_LENGTH;
 
             // Check if any horse is near this camera's segment
             const isActive = rankings.some(horse => {
@@ -135,7 +136,7 @@ export const Track2DView = () => {
                 ...getInnerPos(pct),
                 active: isActive,
                 name: cam.name,
-                range: `${cam.trackStart}–${cam.trackEnd}m`,
+                label: `${position}m`,  // Just show the position: 100m, 200m, etc.
             };
         });
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -223,21 +224,21 @@ export const Track2DView = () => {
                         </text>
                     ))}
 
-                    {/* Analytics Cameras (INSIDE track) */}
+                    {/* Analytics Cameras (ON track inner edge) */}
                     {cameras.map((c, i) => (
                         <g key={i}>
-                            <circle cx={c.x} cy={c.y} r={c.active ? 8 : 6} fill={c.active ? '#F59E0B' : '#475569'}
-                                stroke={c.active ? '#FCD34D' : '#64748b'} strokeWidth="2" />
+                            <circle cx={c.x} cy={c.y} r={c.active ? 6 : 4} fill={c.active ? '#F59E0B' : '#64748b'}
+                                stroke={c.active ? '#FCD34D' : '#94a3b8'} strokeWidth="1.5" />
                             {c.active && (
-                                <circle cx={c.x} cy={c.y} r={14} fill="none" stroke="#F59E0B" strokeWidth="1.5" opacity="0.4">
-                                    <animate attributeName="r" values="8;16;8" dur="1s" repeatCount="indefinite" />
+                                <circle cx={c.x} cy={c.y} r={10} fill="none" stroke="#F59E0B" strokeWidth="1" opacity="0.4">
+                                    <animate attributeName="r" values="6;12;6" dur="1s" repeatCount="indefinite" />
                                     <animate attributeName="opacity" values="0.4;0;0.4" dur="1s" repeatCount="indefinite" />
                                 </circle>
                             )}
-                            {/* Camera label */}
-                            <text x={c.x} y={c.y - 14} fontSize="10" fill={c.active ? '#FCD34D' : '#64748b'}
-                                textAnchor="middle" fontWeight="600">
-                                {c.range}
+                            {/* Camera label - placed below/near the camera marker */}
+                            <text x={c.x} y={c.y + 12} fontSize="9" fill={c.active ? '#FCD34D' : '#64748b'}
+                                textAnchor="middle" dominantBaseline="hanging" fontWeight="600" style={{ pointerEvents: 'none' }}>
+                                {c.label}
                             </text>
                         </g>
                     ))}

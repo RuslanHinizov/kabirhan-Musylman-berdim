@@ -3,11 +3,12 @@
 
 import { useRaceStore } from '../store/raceStore';
 import { useCameraStore } from '../store/cameraStore';
-import { findClosestSilkId, getSilkColor, getDefaultSilkId } from '../utils/silkUtils';
+import { findClosestSilkId, getSilkColor } from '../utils/silkUtils';
+import { BACKEND_WS_URL } from '../config/backend';
 
 // Configuration
 const CONFIG = {
-    WS_URL: 'ws://localhost:8000/ws',  // Backend WebSocket URL (race_vision backend)
+    WS_URL: BACKEND_WS_URL,             // Backend WebSocket URL (race_vision backend)
     RECONNECT_DELAY: 3000,              // Retry connection every 3 seconds
     HEARTBEAT_INTERVAL: 5000,           // Send ping every 5 seconds
 };
@@ -17,6 +18,8 @@ let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let isConnected = false;
+let manualDisconnect = false;
+let connectionVersion = 0;
 
 // Connection status callback
 let onStatusChange: ((status: 'connecting' | 'connected' | 'disconnected' | 'error') => void) | null = null;
@@ -26,38 +29,57 @@ export const setConnectionStatusCallback = (callback: typeof onStatusChange) => 
     onStatusChange = callback;
 };
 
+const clearHeartbeat = () => {
+    if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+    }
+};
+
 // Connect to backend
 export const connectToBackend = () => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
         console.log('Already connected to backend');
         return;
     }
 
-    console.log(`🔌 Connecting to backend: ${CONFIG.WS_URL}`);
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+    }
+
+    manualDisconnect = false;
+    console.log(`Connecting to backend: ${CONFIG.WS_URL}`);
     onStatusChange?.('connecting');
 
     try {
-        ws = new WebSocket(CONFIG.WS_URL);
+        const socket = new WebSocket(CONFIG.WS_URL);
+        ws = socket;
 
-        ws.onopen = () => {
-            console.log('✅ Connected to AI backend');
+        const myVersion = ++connectionVersion;
+        const isStale = () => ws !== socket || myVersion !== connectionVersion;
+
+        socket.onopen = () => {
+            if (isStale()) return;
+
+            console.log('Connected to AI backend');
             isConnected = true;
             onStatusChange?.('connected');
 
-            // Start heartbeat
+            clearHeartbeat();
             heartbeatTimer = setInterval(() => {
-                if (ws?.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: 'ping' }));
+                if (!isStale() && socket.readyState === WebSocket.OPEN) {
+                    socket.send(JSON.stringify({ type: 'ping' }));
                 }
             }, CONFIG.HEARTBEAT_INTERVAL);
 
-            // Request initial state
-            if (ws) {
-                ws.send(JSON.stringify({ type: 'get_state' }));
+            if (!isStale() && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'get_state' }));
             }
         };
 
-        ws.onmessage = (event) => {
+        socket.onmessage = (event) => {
+            if (isStale()) return;
             try {
                 const message = JSON.parse(event.data);
                 handleBackendMessage(message);
@@ -66,26 +88,29 @@ export const connectToBackend = () => {
             }
         };
 
-        ws.onerror = (error) => {
-            console.error('❌ WebSocket error:', error);
+        socket.onerror = (error) => {
+            if (isStale()) return;
+            console.error('WebSocket error:', error);
             onStatusChange?.('error');
         };
 
-        ws.onclose = () => {
-            console.log('🔌 Disconnected from backend');
+        socket.onclose = () => {
+            if (isStale()) return;
+
+            ws = null;
             isConnected = false;
             onStatusChange?.('disconnected');
+            clearHeartbeat();
+            console.log('Disconnected from backend');
 
-            // Clear heartbeat
-            if (heartbeatTimer) clearInterval(heartbeatTimer);
-
-            // Schedule reconnect
-            reconnectTimer = setTimeout(() => {
-                console.log('🔄 Attempting to reconnect...');
-                connectToBackend();
-            }, CONFIG.RECONNECT_DELAY);
+            if (!manualDisconnect) {
+                reconnectTimer = setTimeout(() => {
+                    if (manualDisconnect) return;
+                    console.log('Reconnecting to backend...');
+                    connectToBackend();
+                }, CONFIG.RECONNECT_DELAY);
+            }
         };
-
     } catch (error) {
         console.error('Failed to connect:', error);
         onStatusChange?.('error');
@@ -94,20 +119,26 @@ export const connectToBackend = () => {
 
 // Disconnect from backend
 export const disconnectFromBackend = () => {
+    manualDisconnect = true;
+    connectionVersion += 1; // invalidate pending callbacks from previous sockets
+
     if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
     }
-    if (heartbeatTimer) {
-        clearInterval(heartbeatTimer);
-        heartbeatTimer = null;
-    }
+
+    clearHeartbeat();
+
     if (ws) {
-        ws.close();
+        const socket = ws;
         ws = null;
+        if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+            socket.close();
+        }
     }
+
     isConnected = false;
-    console.log('🔌 Disconnected from backend');
+    console.log('Disconnected from backend');
 };
 
 // Send message to backend
@@ -119,20 +150,50 @@ export const sendToBackend = (message: object) => {
     }
 };
 
+const toFrontendHorse = (horse: HorseData, fallbackPosition: number) => {
+    const detectedColor = horse.color || getDefaultColor(horse.number);
+    const silkId = horse.silkId || findClosestSilkId(detectedColor);
+    return {
+        id: horse.id,
+        name: horse.name || `Horse ${horse.number}`,
+        number: horse.number,
+        color: detectedColor,
+        jockeyName: horse.jockeyName || `Jockey ${horse.number}`,
+        currentPosition: fallbackPosition,
+        currentLap: 1,
+        timeElapsed: 0,
+        gapToLeader: 0,
+        distanceCovered: 0,
+        speed: 0,
+        lastCameraId: '',
+        silkId,
+        silkColor: getSilkColor(silkId),
+    };
+};
+
+const applyHorseRoster = (horses: HorseData[] | undefined) => {
+    if (!horses || horses.length === 0) return;
+    const { setHorses } = useRaceStore.getState();
+    const mapped = horses.map((horse, index) => toFrontendHorse(horse, index + 1));
+    setHorses(mapped);
+};
+
 // Handle incoming messages from backend
 const handleBackendMessage = (message: BackendMessage) => {
-    const { updateRankings, startRace, stopRace, setRaceConfig, addHorse, clearHorses } = useRaceStore.getState();
+    const { updateRankings, startRace, stopRace, setRaceConfig } = useRaceStore.getState();
     const { updateAnalyticsCameraHorses, setActivePTZ } = useCameraStore.getState();
 
     switch (message.type) {
         // ============ RACE EVENTS ============
         case 'race_start':
-            console.log('🏁 Race started from backend');
+            console.log('рџЏЃ Race started from backend');
             if (message.race) {
                 setRaceConfig({
                     name: message.race.name,
                     totalLaps: message.race.totalLaps,
                     trackLength: message.race.trackLength,
+                    startFinishPosition: message.race.startFinishPosition,
+                    status: message.race.status,
                 });
             }
             startRace();
@@ -140,43 +201,30 @@ const handleBackendMessage = (message: BackendMessage) => {
 
         case 'race_stop':
         case 'race_finish':
-            console.log('🏁 Race finished');
+            console.log('рџЏЃ Race finished');
             stopRace();
             break;
 
         // ============ HORSE EVENTS ============
         case 'horses_detected':
             // Backend detected horses at race start
-            console.log(`🏇 ${message.horses?.length} horses detected`);
-            clearHorses();
-            message.horses?.forEach((horse: HorseData) => {
-                const detectedColor = horse.color || getDefaultColor(horse.number);
-                const silkId = horse.silkId || findClosestSilkId(detectedColor);
-                addHorse({
-                    id: horse.id,
-                    name: horse.name || `Horse ${horse.number}`,
-                    number: horse.number,
-                    color: detectedColor,
-                    jockeyName: horse.jockeyName || `Jockey ${horse.number}`,
-                    silkId: silkId,
-                    silkColor: getSilkColor(silkId),
-                });
-            });
+            console.log(`рџЏ‡ ${message.horses?.length} horses detected`);
+            applyHorseRoster(message.horses);
             break;
 
         case 'horse_update':
             // Single horse position update
             // This is called when a horse passes a camera
-            console.log(`📷 Horse #${message.horse?.number} at camera ${message.cameraId}`);
+            console.log(`рџ“· Horse #${message.horse?.number} at camera ${message.cameraId}`);
             break;
 
         // ============ RANKING EVENTS ============
         case 'ranking_update':
             // Main ranking update - called when horses pass cameras
-            console.log('📊 Ranking update received');
+            console.log('рџ“Љ Ranking update received');
             if (message.rankings) {
                 const formattedRankings = message.rankings.map((r: RankingData, index: number) => {
-                    // Backend'den gelen renk ile en yakın silk'i eşleştir
+                    // Backend'den gelen renk ile en yakД±n silk'i eЕџleЕџtir
                     const detectedColor = r.color || getDefaultColor(r.number);
                     const silkId = r.silkId || findClosestSilkId(detectedColor);
                     const silkColor = r.silkColor || getSilkColor(silkId);
@@ -204,9 +252,17 @@ const handleBackendMessage = (message: BackendMessage) => {
 
         // ============ CAMERA EVENTS ============
         case 'camera_detection':
-            // Horses detected in a specific camera
+            // Backward-compatible payload: { cameraId, horseIds }
             if (message.cameraId && message.horseIds) {
                 updateAnalyticsCameraHorses(message.cameraId, message.horseIds);
+            }
+            // New payload: { cameras: { "analytics-1": ["red", ...], ... } }
+            if (message.cameras) {
+                Object.entries(message.cameras).forEach(([cameraId, horseIds]) => {
+                    if (Array.isArray(horseIds)) {
+                        updateAnalyticsCameraHorses(cameraId, horseIds);
+                    }
+                });
             }
             break;
 
@@ -224,17 +280,18 @@ const handleBackendMessage = (message: BackendMessage) => {
 
         case 'state':
             // Full state sync
-            console.log('📦 Received full state from backend');
+            console.log('рџ“¦ Received full state from backend');
             if (message.race) {
                 setRaceConfig(message.race);
             }
+            applyHorseRoster(message.horses);
             if (message.rankings) {
                 handleBackendMessage({ type: 'ranking_update', rankings: message.rankings });
             }
             break;
 
         case 'error':
-            console.error('❌ Backend error:', message.message);
+            console.error('вќЊ Backend error:', message.message);
             break;
 
         default:
@@ -262,13 +319,15 @@ interface BackendMessage {
         name: string;
         totalLaps: number;
         trackLength: number;
-        status?: string;
+        startFinishPosition?: number;
+        status?: 'pending' | 'active' | 'finished';
     };
     horses?: HorseData[];
     horse?: HorseData;
     rankings?: RankingData[];
     cameraId?: string;
     horseIds?: string[];
+    cameras?: Record<string, string[]>;
     message?: string;
 }
 

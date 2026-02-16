@@ -18,49 +18,36 @@ export type PTZCameraConfig = {
     id: string;
     name: string;
     rtspUrl: string;
-    mjpegUrl: string;     // MJPEG stream URL for public display
     position: number;     // meters — position on track
     status: 'online' | 'offline';
 };
 
 // ============================================================
-// BACKEND URL
-// ============================================================
-
-const BACKEND_URL = 'http://localhost:8000';
-
-// ============================================================
-// ANALYTICS CAMERAS — processed by backend (YOLO + CNN detection)
+// ANALYTICS CAMERAS — 25 cameras for 2500m track (100m each)
+// IP range: 10.223.70.20 - 10.223.70.44
 // Viewers NEVER see these streams. Only the detection results
 // (jockey positions, rankings) are sent to the frontend.
 // ============================================================
 
-export const ANALYTICS_CAMERAS: AnalyticsCameraConfig[] = [
-    {
-        id: 'analytics-1',
-        name: 'Analytics Camera 1',
-        rtspUrl: 'rtsp://admin:password@192.168.1.101:554/stream',
-        trackStart: 0,
-        trackEnd: 100,
-        status: 'online',
-    },
-    {
-        id: 'analytics-2',
-        name: 'Analytics Camera 2',
-        rtspUrl: 'rtsp://admin:password@192.168.1.102:554/stream',
-        trackStart: 100,
-        trackEnd: 200,
-        status: 'online',
-    },
-    {
-        id: 'analytics-3',
-        name: 'Analytics Camera 3',
-        rtspUrl: 'rtsp://admin:password@192.168.1.103:554/stream',
-        trackStart: 200,
-        trackEnd: 300,
-        status: 'online',
-    },
-];
+// Generate 25 analytics cameras dynamically
+const generateAnalyticsCameras = (): AnalyticsCameraConfig[] => {
+    const cameras: AnalyticsCameraConfig[] = [];
+
+    for (let i = 0; i < 25; i++) {
+        cameras.push({
+            id: `analytics-${i + 1}`,
+            name: `Camera ${i + 1}`,
+            rtspUrl: '',
+            trackStart: i * 100,
+            trackEnd: (i + 1) * 100,
+            status: 'offline',
+        });
+    }
+
+    return cameras;
+};
+
+export const ANALYTICS_CAMERAS: AnalyticsCameraConfig[] = generateAnalyticsCameras();
 
 // ============================================================
 // PTZ CAMERAS — shown to viewers on public display
@@ -72,25 +59,29 @@ export const PTZ_CAMERAS: PTZCameraConfig[] = [
     {
         id: 'ptz-1',
         name: 'PTZ Camera 1',
-        rtspUrl: 'rtsp://admin:password@192.168.1.201:554/stream',
-        mjpegUrl: '',   // Set real PTZ stream URL when camera is connected
+        rtspUrl: '',
         position: 0,
         status: 'offline',
     },
     {
         id: 'ptz-2',
         name: 'PTZ Camera 2',
-        rtspUrl: 'rtsp://admin:password@192.168.1.202:554/stream',
-        mjpegUrl: '',
-        position: 100,
+        rtspUrl: '',
+        position: 833,  // ~1/3 of track
         status: 'offline',
     },
     {
         id: 'ptz-3',
         name: 'PTZ Camera 3',
-        rtspUrl: 'rtsp://admin:password@192.168.1.203:554/stream',
-        mjpegUrl: '',
-        position: 200,
+        rtspUrl: '',
+        position: 1667,  // ~2/3 of track
+        status: 'offline',
+    },
+    {
+        id: 'ptz-4',
+        name: 'PTZ Camera 4',
+        rtspUrl: '',
+        position: 2500,  // End of track
         status: 'offline',
     },
 ];

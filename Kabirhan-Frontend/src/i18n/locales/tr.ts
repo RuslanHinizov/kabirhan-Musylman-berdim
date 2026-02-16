@@ -108,4 +108,90 @@ export const tr = {
         home: 'Ana Konum',
         selectCamera: 'Kamera Seç',
     },
+
+    // Camera Grid
+    cameraGrid: {
+        analyticsCameras: 'Analitik Kameralar',
+        cameraCount: 'kamera — YOLO + CNN algılama (izleyicilere gösterilmez)',
+        horseDetected: 'at tespit edildi',
+        horsesDetected: 'at tespit edildi',
+        online: 'Çevrimiçi',
+        offline: 'Çevrimdışı',
+        horseDetectedLegend: 'At Tespit Edildi',
+    },
+
+    // Camera Settings
+    cameraSettings: {
+        title: 'Kamera Yapılandırması',
+        description: 'RTSP kamera akışlarını yönet',
+        ptzBroadcast: 'PTZ Kameralar (Yayın)',
+        analyticsDetection: 'Analitik Kameralar (Algılama)',
+        active: 'aktif',
+        backendServer: 'Backend Sunucusu',
+        rtspPlaceholder: 'rtsp://kullanici:sifre@ip:port/akis',
+        save: 'Kaydet',
+        stopStream: 'Yayını Durdur',
+        startStream: 'Yayını Başlat',
+    },
+
+    // PTZ Control Panel
+    ptzPanel: {
+        title: 'PTZ Kamera Kontrolü',
+        description: 'Herkese açık ekran için aktif yayın kamerasını seçin',
+        onAir: 'CANLI',
+        online: 'Çevrimiçi',
+        offline: 'Çevrimdışı',
+        position: 'Pozisyon',
+        keyboardTip: 'İpucu: Hızlı geçiş için 1-{{count}} tuşlarına basın',
+    },
+
+    // Race Settings Page
+    raceSettings: {
+        title: 'Yarış Ayarları',
+        description: 'Yarış parametrelerini ve atları yapılandırın',
+        raceConfiguration: 'Yarış Yapılandırması',
+        raceName: 'Yarış Adı',
+        totalLaps: 'Toplam Tur',
+        startFinishPosition: 'Başlangıç/Bitiş Konumu',
+        raceControls: 'Yarış Kontrolleri',
+        startRace: 'Yarışı Başlat',
+        stopRace: 'Yarışı Durdur',
+        reset: 'Sıfırla',
+        status: 'Durum',
+        ready: 'Hazır',
+        racing: 'Yarışıyor',
+        finished: 'Bitti',
+        settings: 'Ayarlar',
+        saveSettings: 'Ayarları Kaydet',
+        horses: 'Atlar',
+        addHorse: 'At Ekle',
+        horseName: 'At Adı',
+        jockeyName: 'Jokey Adı',
+        colorOverride: 'Renk Değiştir',
+        removeHorse: 'Atı Kaldır',
+        noHorses: 'Henüz at eklenmedi. Başlamak için "At Ekle" butonuna tıklayın.',
+    },
+
+    // PTZ Camera Display
+    ptzDisplay: {
+        noCameraFeed: 'Kamera Yayını Yok',
+        live: 'CANLI',
+        hd: 'HD',
+        race: 'Yarış',
+        defaultRaceName: 'Büyük Şampiyona',
+    },
+
+    // Ranking Board
+    ranking: {
+        liveStandings: 'Canlı Sıralama',
+        leader: 'Lider:',
+    },
+
+    // Stream Players
+    stream: {
+        connectingWebRTC: 'WebRTC ile bağlanılıyor...',
+        connectingStream: 'Yayına bağlanılıyor...',
+        streamOffline: 'Yayın Çevrimdışı',
+        webrtcLabel: 'WebRTC',
+    },
 };

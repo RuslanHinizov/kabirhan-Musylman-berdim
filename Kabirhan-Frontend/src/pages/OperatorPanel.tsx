@@ -9,6 +9,8 @@ import { CameraSettings } from '../components/operator/CameraSettings';
 import { LanguageSelector } from '../components/LanguageSelector';
 import { useCameraStore } from '../store/cameraStore';
 import { useRaceStore } from '../store/raceStore';
+import { PTZ_CAMERAS, ANALYTICS_CAMERAS } from '../config/cameras';
+import { BACKEND_HTTP_URL } from '../config/backend';
 import {
     connectToBackend,
     disconnectFromBackend,
@@ -22,7 +24,7 @@ export const OperatorPanel = () => {
     const { t } = useTranslation();
     const [activeTab, setActiveTab] = useState<TabId>('ptz');
     const [backendStatus, setBackendStatus] = useState<ConnectionStatus>('disconnected');
-    const { initializeCameras } = useCameraStore();
+    const { initializeCameras, updateCameraStatus } = useCameraStore();
     const { initializeDefaultRace, race, rankings, setBackendConnected } = useRaceStore();
 
     const tabs = [
@@ -64,6 +66,35 @@ export const OperatorPanel = () => {
         return () => window.removeEventListener('keydown', handleKeyDown);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    // Keep camera online/offline badges synced with backend runtime state
+    useEffect(() => {
+        const allCameraIds = [...PTZ_CAMERAS, ...ANALYTICS_CAMERAS].map((cam) => cam.id);
+
+        const syncStatuses = async () => {
+            try {
+                const response = await fetch(`${BACKEND_HTTP_URL}/api/streams/status`);
+                if (!response.ok) return;
+
+                const status = await response.json() as Record<string, { state?: string }>;
+                const onlineIds = new Set(
+                    Object.entries(status)
+                        .filter(([, value]) => value?.state === 'running')
+                        .map(([id]) => id)
+                );
+
+                allCameraIds.forEach((id) => {
+                    updateCameraStatus(id, onlineIds.has(id) ? 'online' : 'offline');
+                });
+            } catch {
+                // Keep last known statuses on transient backend/network errors
+            }
+        };
+
+        syncStatuses();
+        const interval = setInterval(syncStatuses, 3000);
+        return () => clearInterval(interval);
+    }, [updateCameraStatus]);
 
     const renderContent = () => {
         switch (activeTab) {

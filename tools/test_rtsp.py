@@ -22,9 +22,24 @@ from datetime import datetime
 # Default RTSP URL
 DEFAULT_URL = "rtsp://admin:Qaz445566@192.168.18.59:554//stream"
 
-# Bundled ffmpeg
-FFMPEG = str(Path(__file__).resolve().parent.parent /
-             ".venv/lib/site-packages/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe")
+# Find ffmpeg: try imageio_ffmpeg first, then system PATH, then bundled path
+def _find_ffmpeg() -> str:
+    # 1. Try imageio_ffmpeg
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except (ImportError, RuntimeError):
+        pass
+    # 2. Try system PATH (where ffmpeg)
+    import shutil
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return system_ffmpeg
+    # 3. Fallback to bundled path (may not exist)
+    return str(Path(__file__).resolve().parent.parent /
+               ".venv/Lib/site-packages/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe")
+
+FFMPEG = _find_ffmpeg()
 
 OUTPUT_DIR = "results/rtsp_test"
 
@@ -121,8 +136,10 @@ class FFmpegReader:
         cmd = [
             FFMPEG,
             "-rtsp_transport", "tcp",
-            "-fflags", "nobuffer",
+            # Prefer stable decode over ultra-low latency to avoid green/garbled bands.
+            "-fflags", "+genpts+discardcorrupt",
             "-flags", "low_delay",
+            "-vsync", "0",
         ]
         if gpu:
             cuvid = "hevc_cuvid" if codec == "hevc" else "h264_cuvid"
@@ -130,6 +147,8 @@ class FFmpegReader:
 
         cmd += [
             "-i", url,
+            # Downscale before raw pipe output to keep multi-camera mode stable.
+            "-vf", f"scale={self.width}:{self.height}:flags=fast_bilinear",
             "-f", "rawvideo",
             "-pix_fmt", "bgr24",
             "-an",
@@ -166,23 +185,91 @@ class FFmpegReader:
 
 
 def parse_resolution(url: str) -> tuple:
-    """Get stream resolution from ffmpeg probe"""
+    """Get stream resolution from direct frame decode, then probe, then OpenCV fallback."""
+    import re
+
+    # Method 0: decode one JPEG frame from ffmpeg image2pipe (most reliable)
+    cmd = [
+        FFMPEG, "-rtsp_transport", "tcp",
+        "-i", url,
+        "-frames:v", "1",
+        "-an",
+        "-f", "image2pipe",
+        "-vcodec", "mjpeg",
+        "-"
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=20)
+        if result.stdout:
+            arr = np.frombuffer(result.stdout, dtype=np.uint8)
+            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if frame is not None and frame.size > 0:
+                h, w = frame.shape[:2]
+                if w > 0 and h > 0:
+                    print(f"  [parse_resolution] frame decode detected: {w}x{h}")
+                    return w, h
+    except subprocess.TimeoutExpired:
+        print(f"  [parse_resolution] frame decode timed out (20s)")
+    except Exception as e:
+        print(f"  [parse_resolution] frame decode error: {e}")
+
+    # Method 1: ffmpeg probe
     cmd = [
         FFMPEG, "-rtsp_transport", "tcp",
         "-i", url,
         "-frames:v", "1", "-f", "null", "-"
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
         for line in result.stderr.split('\n'):
             if 'Video:' in line:
-                # Look for WxH pattern
-                import re
                 match = re.search(r'(\d{3,5})x(\d{3,5})', line)
                 if match:
                     return int(match.group(1)), int(match.group(2))
-    except Exception:
-        pass
+        # Log why it failed
+        err_lines = [l.strip() for l in result.stderr.split('\n') if l.strip()]
+        if err_lines:
+            print(f"  [parse_resolution] ffmpeg probe output (last 3 lines):")
+            for l in err_lines[-3:]:
+                print(f"    {l}")
+    except subprocess.TimeoutExpired:
+        print(f"  [parse_resolution] ffmpeg probe timed out (20s)")
+    except FileNotFoundError:
+        print(f"  [parse_resolution] ffmpeg not found at {FFMPEG}")
+    except Exception as e:
+        print(f"  [parse_resolution] ffmpeg probe error: {e}")
+
+    # Method 2: OpenCV fallback (more compatible with various RTSP servers)
+    print(f"  [parse_resolution] Trying OpenCV fallback...")
+    try:
+        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        # Set TCP transport for OpenCV
+        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 15000)
+        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 15000)
+
+        if cap.isOpened():
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if w > 0 and h > 0:
+                print(f"  [parse_resolution] OpenCV detected: {w}x{h}")
+                cap.release()
+                return w, h
+
+            # Try reading a frame to get resolution
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                h, w = frame.shape[:2]
+                print(f"  [parse_resolution] OpenCV frame read: {w}x{h}")
+                cap.release()
+                return w, h
+
+        cap.release()
+    except Exception as e:
+        print(f"  [parse_resolution] OpenCV fallback error: {e}")
+
+    # Method 3: Try common resolutions as last resort
+    # Return 0,0 so caller knows it failed
+    print(f"  [parse_resolution] All methods failed for URL")
     return 0, 0
 
 

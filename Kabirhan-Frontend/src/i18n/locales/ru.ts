@@ -108,4 +108,90 @@ export const ru = {
         home: 'Домой',
         selectCamera: 'Выбрать камеру',
     },
+
+    // Camera Grid
+    cameraGrid: {
+        analyticsCameras: 'Аналитические камеры',
+        cameraCount: 'камер — YOLO + CNN распознавание (зрителям не показывается)',
+        horseDetected: 'лошадь обнаружена',
+        horsesDetected: 'лошадей обнаружено',
+        online: 'Онлайн',
+        offline: 'Офлайн',
+        horseDetectedLegend: 'Лошадь обнаружена',
+    },
+
+    // Camera Settings
+    cameraSettings: {
+        title: 'Настройка камер',
+        description: 'Управление RTSP потоками камер',
+        ptzBroadcast: 'PTZ камеры (Трансляция)',
+        analyticsDetection: 'Аналитические камеры (Распознавание)',
+        active: 'активно',
+        backendServer: 'Сервер',
+        rtspPlaceholder: 'rtsp://логин:пароль@ip:порт/поток',
+        save: 'Сохранить',
+        stopStream: 'Остановить поток',
+        startStream: 'Запустить поток',
+    },
+
+    // PTZ Control Panel
+    ptzPanel: {
+        title: 'Управление PTZ камерой',
+        description: 'Выберите активную камеру для публичной трансляции',
+        onAir: 'В ЭФИРЕ',
+        online: 'Онлайн',
+        offline: 'Офлайн',
+        position: 'Позиция',
+        keyboardTip: 'Совет: Нажмите 1-{{count}} для быстрого переключения',
+    },
+
+    // Race Settings Page
+    raceSettings: {
+        title: 'Настройки скачек',
+        description: 'Настройка параметров скачек и лошадей',
+        raceConfiguration: 'Конфигурация скачек',
+        raceName: 'Название скачек',
+        totalLaps: 'Всего кругов',
+        startFinishPosition: 'Позиция старта/финиша',
+        raceControls: 'Управление скачками',
+        startRace: 'Начать скачки',
+        stopRace: 'Остановить скачки',
+        reset: 'Сбросить',
+        status: 'Статус',
+        ready: 'Готов',
+        racing: 'Скачки идут',
+        finished: 'Завершено',
+        settings: 'Настройки',
+        saveSettings: 'Сохранить настройки',
+        horses: 'Лошади',
+        addHorse: 'Добавить лошадь',
+        horseName: 'Имя лошади',
+        jockeyName: 'Имя жокея',
+        colorOverride: 'Изменить цвет',
+        removeHorse: 'Удалить лошадь',
+        noHorses: 'Лошади ещё не добавлены. Нажмите "Добавить лошадь" для начала.',
+    },
+
+    // PTZ Camera Display
+    ptzDisplay: {
+        noCameraFeed: 'Нет видеопотока',
+        live: 'ПРЯМОЙ ЭФИР',
+        hd: 'HD',
+        race: 'Скачки',
+        defaultRaceName: 'Большой чемпионат',
+    },
+
+    // Ranking Board
+    ranking: {
+        liveStandings: 'Текущий рейтинг',
+        leader: 'Лидер:',
+    },
+
+    // Stream Players
+    stream: {
+        connectingWebRTC: 'Подключение через WebRTC...',
+        connectingStream: 'Подключение к потоку...',
+        streamOffline: 'Поток офлайн',
+        webrtcLabel: 'WebRTC',
+    },
 };

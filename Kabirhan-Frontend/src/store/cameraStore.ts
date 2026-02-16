@@ -15,29 +15,44 @@ interface CameraState {
     ptzCameras: PTZCameraState[];
     analyticsCameras: AnalyticsCameraState[];
     activePTZCameraId: string;
+    streamMode: 'webrtc' | 'mjpeg';
 
     // Actions
     setActivePTZCamera: (cameraId: string) => void;
     setActivePTZ: (cameraId: string) => void;
+    setStreamMode: (mode: 'webrtc' | 'mjpeg') => void;
     updateCameraStatus: (cameraId: string, status: 'online' | 'offline') => void;
     updateAnalyticsCameraHorses: (cameraId: string, horseIds: string[]) => void;
     initializeCameras: () => void;
     syncFromStorage: () => void;
 }
 
-// Build PTZ cameras from config
+// Get saved RTSP URLs from localStorage
+const getSavedUrls = (): Record<string, string> => {
+    try {
+        return JSON.parse(localStorage.getItem('race-vision-camera-urls') || '{}');
+    } catch {
+        return {};
+    }
+};
+
+// Build PTZ cameras from config + saved URLs
 const createPTZCameras = (): PTZCameraState[] => {
     const savedCamera = getSavedCamera();
+    const savedUrls = getSavedUrls();
     return PTZ_CAMERAS.map(cam => ({
         ...cam,
+        rtspUrl: savedUrls[cam.id] || cam.rtspUrl,
         isActive: cam.id === savedCamera,
     }));
 };
 
-// Build analytics cameras from config
+// Build analytics cameras from config + saved URLs
 const createAnalyticsCameras = (): AnalyticsCameraState[] => {
+    const savedUrls = getSavedUrls();
     return ANALYTICS_CAMERAS.map(cam => ({
         ...cam,
+        rtspUrl: savedUrls[cam.id] || cam.rtspUrl,
         horsesInView: [],
     }));
 };
@@ -51,6 +66,9 @@ export const useCameraStore = create<CameraState>((set, get) => ({
     ptzCameras: createPTZCameras(),
     analyticsCameras: createAnalyticsCameras(),
     activePTZCameraId: getSavedCamera(),
+    streamMode: 'webrtc',
+
+    setStreamMode: (mode) => set({ streamMode: mode }),
 
     setActivePTZCamera: (cameraId) => {
         localStorage.setItem('activePTZCamera', cameraId);

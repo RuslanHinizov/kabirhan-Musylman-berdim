@@ -1,40 +1,13 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { motion, AnimatePresence, useSpring, useTransform } from 'framer-motion';
 import { Trophy } from 'lucide-react';
 import { connectToBackend, disconnectFromBackend } from '../services/backendConnection';
 import { useRaceStore } from '../store/raceStore';
 import { useCameraStore } from '../store/cameraStore';
-import { MJPEGPlayer } from '../components/MJPEGPlayer';
+import { WebRTCPlayer } from '../components/WebRTCPlayer';
 import { getSilkImagePath } from '../utils/silkUtils';
-
-// Track position changes per horse for arc animations
-const usePositionChanges = (rankings: { id: string; currentPosition: number }[]) => {
-    const prevPositions = useRef<Record<string, number>>({});
-    const [deltas, setDeltas] = useState<Record<string, number>>({});
-
-    useEffect(() => {
-        const newDeltas: Record<string, number> = {};
-        let hasChange = false;
-
-        for (const horse of rankings) {
-            const prev = prevPositions.current[horse.id];
-            if (prev !== undefined && prev !== horse.currentPosition) {
-                newDeltas[horse.id] = horse.currentPosition - prev;
-                hasChange = true;
-            }
-            prevPositions.current[horse.id] = horse.currentPosition;
-        }
-
-        if (hasChange) {
-            setDeltas(newDeltas);
-            const timer = setTimeout(() => setDeltas({}), 10000);
-            return () => clearTimeout(timer);
-        }
-    }, [rankings]);
-
-    return deltas;
-};
+import { BACKEND_HTTP_URL } from '../config/backend';
 
 // Format time as MM:SS.d
 const formatTime = (seconds: number): string => {
@@ -76,6 +49,7 @@ export const PublicDisplay = () => {
     const { t } = useTranslation();
     const { race, rankings } = useRaceStore();
     const { activePTZCameraId, ptzCameras, syncFromStorage } = useCameraStore();
+    const [ptzStates, setPtzStates] = useState<Record<string, string>>({});
 
     // Connect to backend WebSocket
     useEffect(() => {
@@ -90,9 +64,29 @@ export const PublicDisplay = () => {
         return () => window.removeEventListener('storage', handleStorageChange);
     }, [syncFromStorage]);
 
-    // Get active PTZ camera — only show video if mjpegUrl is set
-    const activePTZ = ptzCameras.find(c => c.id === activePTZCameraId);
-    const ptzStreamUrl = activePTZ?.mjpegUrl || '';
+    // Keep runtime PTZ states synced to avoid retry storms on offline cameras.
+    useEffect(() => {
+        const fetchPtzStates = async () => {
+            try {
+                const response = await fetch(`${BACKEND_HTTP_URL}/api/streams/status`);
+                if (!response.ok) return;
+                const all = await response.json() as Record<string, { state?: string }>;
+                const next: Record<string, string> = {};
+                ptzCameras.forEach((cam) => {
+                    next[cam.id] = all[cam.id]?.state || 'idle';
+                });
+                setPtzStates(next);
+            } catch {
+                // Keep last known states on transient errors.
+            }
+        };
+
+        void fetchPtzStates();
+        const interval = setInterval(() => {
+            void fetchPtzStates();
+        }, 3000);
+        return () => clearInterval(interval);
+    }, [ptzCameras]);
 
     const leader = rankings[0];
     const speed = leader ? leader.speed * 3.6 : 0;
@@ -102,19 +96,34 @@ export const PublicDisplay = () => {
     // Top horses for ranking display
     const topHorses = rankings.slice(0, 10);
 
-    // Track position changes for arc animation
-    const positionDeltas = usePositionChanges(rankings);
-
     return (
         <div className="h-screen w-screen bg-black relative overflow-hidden">
-            {/* PTZ Video Background — only if PTZ camera has a stream URL configured */}
-            {ptzStreamUrl && (
-                <MJPEGPlayer
-                    url={ptzStreamUrl}
-                    cameraName={activePTZ?.name || 'PTZ'}
-                    className="absolute inset-0 w-full h-full"
-                />
-            )}
+            {/* PTZ Video Background - keep PTZ WebRTC streams warm for instant camera switching */}
+            {ptzCameras.map((cam) => (
+                <div
+                    key={cam.id}
+                    className={`absolute inset-0 transition-opacity duration-150 ${
+                        cam.id === activePTZCameraId ? 'opacity-100 z-0' : 'opacity-0 pointer-events-none'
+                    }`}
+                >
+                    {(() => {
+                        const state = ptzStates[cam.id] || 'idle';
+                        const isActive = cam.id === activePTZCameraId;
+                        const shouldEnable = isActive;
+
+                        return (
+                            <WebRTCPlayer
+                                camId={cam.id}
+                                cameraName={cam.name}
+                                className="w-full h-full"
+                                objectFit="cover"
+                                fallbackToMjpeg={isActive && state !== 'offline'}
+                                enabled={shouldEnable}
+                            />
+                        );
+                    })()}
+                </div>
+            ))}
 
             {/* TOP LEFT - Time & Lap */}
             <div className="absolute top-6 left-6 z-10">
@@ -131,103 +140,67 @@ export const PublicDisplay = () => {
             {/* BOTTOM - Professional TV Racing Bar */}
             <div className="absolute bottom-0 left-0 right-0 z-20">
                 <div
-                    className="border-t border-green-900/50"
+                    className="border-t border-white/20"
                     style={{
-                        background: 'linear-gradient(to right, #0a1a0a, #0d1f0d, #0a1a0a)'
+                        background: 'rgba(0, 0, 0, 0.85)',
+                        backdropFilter: 'blur(8px)',
                     }}
                 >
-                    <div className="flex items-center h-[140px]">
+                    <div className="flex items-center h-[120px]">
 
-                        {/* LEFT - Position Marker */}
-                        <div className="flex items-center justify-center w-24 h-full border-r border-green-900/30">
-                            <div className="relative flex flex-col items-center">
-                                <div className="w-12 h-12 rounded-full bg-red-600 border-4 border-white shadow-lg z-10"></div>
-                                <div className="w-1.5 h-14 bg-gradient-to-b from-gray-300 to-gray-500 -mt-1"></div>
+                        {/* LEFT - Speedometer */}
+                        <div className="w-36 h-full flex items-center justify-center border-r border-white/10 bg-black/50">
+                            <div className="text-center">
+                                <div className="text-4xl font-bold text-white font-mono tabular-nums">
+                                    <AnimatedNumber value={speed} decimals={1} />
+                                </div>
+                                <div className="text-sm text-gray-400 mt-1">km/h</div>
                             </div>
                         </div>
 
-                        {/* CENTER - Jockeys with Numbers */}
-                        <div className="flex-1 relative overflow-visible" style={{ minHeight: 140 }}>
+                        {/* CENTER - Jockeys with Numbers (1st place on right, last on left) */}
+                        <div className="flex-1 relative overflow-visible" style={{ minHeight: 120 }}>
                             {topHorses.map((horse, index) => {
-                                const delta = positionDeltas[horse.id] || 0;
-                                const isOvertake = delta < 0;
-                                const isFallback = delta > 0;
-
-                                const slotWidth = 90;
+                                const slotWidth = 80;
                                 const containerCenter = 50;
-                                const offsetPx = (index - (topHorses.length - 1) / 2) * slotWidth;
+                                // Reverse: index 0 (1st place) goes to right, last goes to left
+                                const reversedOffset = ((topHorses.length - 1 - index) - (topHorses.length - 1) / 2) * slotWidth;
 
                                 return (
                                     <motion.div
                                         key={horse.id}
-                                        animate={{
-                                            x: offsetPx,
-                                            y: delta < 0 ? [-80, 0] : delta > 0 ? [50, 0] : 0,
-                                            scale: delta !== 0 ? [1.3, 1] : 1,
-                                        }}
+                                        layout
+                                        animate={{ x: reversedOffset }}
                                         transition={{
                                             x: {
-                                                type: 'tween',
-                                                duration: 3,
-                                                ease: [0.25, 0.1, 0.25, 1],
+                                                type: 'spring',
+                                                stiffness: 40,
+                                                damping: 30,
                                             },
-                                            y: {
-                                                type: 'tween',
-                                                duration: 3,
-                                                ease: [0.25, 0.1, 0.25, 1],
-                                            },
-                                            scale: {
-                                                type: 'tween',
-                                                duration: 2.5,
-                                                ease: 'easeInOut',
+                                            layout: {
+                                                type: 'spring',
+                                                stiffness: 40,
+                                                damping: 30,
                                             },
                                         }}
-                                        className="absolute bottom-2 flex flex-col items-center w-[80px]"
+                                        className="absolute bottom-2 flex flex-col items-center w-[72px]"
                                         style={{
                                             left: `${containerCenter}%`,
-                                            marginLeft: -40,
+                                            marginLeft: -36,
                                         }}
                                     >
-                                        {/* Position change indicator arrow */}
-                                        {isOvertake && (
-                                            <motion.div
-                                                className="absolute -top-8 left-1/2 -translate-x-1/2 text-green-400 font-bold text-lg z-10"
-                                                initial={{ opacity: 0, y: 10 }}
-                                                animate={{ opacity: [0, 1, 1, 0], y: [10, -12, -12, -30] }}
-                                                transition={{ duration: 10, times: [0, 0.05, 0.85, 1] }}
-                                            >
-                                                ▲ +{Math.abs(delta)}
-                                            </motion.div>
-                                        )}
-                                        {isFallback && (
-                                            <motion.div
-                                                className="absolute -top-8 left-1/2 -translate-x-1/2 text-red-400 font-bold text-lg z-10"
-                                                initial={{ opacity: 0, y: -10 }}
-                                                animate={{ opacity: [0, 1, 1, 0], y: [-10, 0, 0, 15] }}
-                                                transition={{ duration: 10, times: [0, 0.05, 0.85, 1] }}
-                                            >
-                                                ▼ -{Math.abs(delta)}
-                                            </motion.div>
-                                        )}
-
-                                        {/* Jockey Icon with glow on change */}
+                                        {/* Jockey Icon */}
                                         <img
                                             src={getSilkImagePath(horse.silkId)}
                                             alt={`#${horse.number}`}
-                                            className="h-[70px] w-auto object-contain"
+                                            className="h-[60px] w-auto object-contain"
                                             style={{
-                                                filter: isOvertake
-                                                    ? 'drop-shadow(0 0 20px rgba(74, 222, 128, 0.9)) drop-shadow(0 0 40px rgba(74, 222, 128, 0.4)) drop-shadow(0 2px 4px rgba(0,0,0,0.5))'
-                                                    : isFallback
-                                                        ? 'drop-shadow(0 0 20px rgba(248, 113, 113, 0.8)) drop-shadow(0 0 40px rgba(248, 113, 113, 0.3)) drop-shadow(0 2px 4px rgba(0,0,0,0.5))'
-                                                        : 'drop-shadow(0 2px 4px rgba(0,0,0,0.5))',
+                                                filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.6))',
                                             }}
                                         />
 
                                         {/* Horse Number */}
-                                        <div className={`font-bold text-xl mt-1 ${
-                                            isOvertake ? 'text-green-300' : isFallback ? 'text-red-300' : 'text-white'
-                                        }`}>
+                                        <div className="font-extrabold text-2xl text-white leading-none mt-1">
                                             {horse.number}
                                         </div>
                                     </motion.div>
@@ -235,13 +208,11 @@ export const PublicDisplay = () => {
                             })}
                         </div>
 
-                        {/* RIGHT - Speedometer */}
-                        <div className="w-36 h-full flex items-center justify-center border-l border-green-900/30 bg-black/30">
-                            <div className="text-center">
-                                <div className="text-4xl font-bold text-white font-mono tabular-nums">
-                                    <AnimatedNumber value={speed} decimals={1} />
-                                </div>
-                                <div className="text-sm text-gray-400 mt-1">km/h</div>
+                        {/* RIGHT - Finish Marker (next to 1st place) */}
+                        <div className="flex items-center justify-center w-20 h-full border-l border-white/10">
+                            <div className="relative flex flex-col items-center">
+                                <div className="w-10 h-10 rounded-full bg-red-600 border-[3px] border-white shadow-lg z-10"></div>
+                                <div className="w-1.5 h-12 bg-gradient-to-b from-gray-300 to-gray-500 -mt-1"></div>
                             </div>
                         </div>
 
