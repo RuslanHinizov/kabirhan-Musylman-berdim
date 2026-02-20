@@ -19,8 +19,11 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime
 
-# Default RTSP URL
-DEFAULT_URL = "rtsp://admin:Qaz445566@192.168.18.59:554//stream"
+# Default RTSP URL — loaded from config (.env) if available
+try:
+    from api.config import DEFAULT_RTSP_URL as DEFAULT_URL
+except ImportError:
+    DEFAULT_URL = "rtsp://admin:admin@192.168.1.100:554/stream"
 
 # Find ffmpeg: try imageio_ffmpeg first, then system PATH, then bundled path
 def _find_ffmpeg() -> str:
@@ -127,20 +130,34 @@ def test_ffmpeg_probe(url: str, gpu: bool = False, codec: str = "h264"):
 class FFmpegReader:
     """Read frames from RTSP via ffmpeg subprocess (handles HEVC properly)"""
 
-    def __init__(self, url: str, width: int, height: int, gpu: bool = False, codec: str = "h264"):
+    def __init__(self, url: str, width: int, height: int, gpu: bool = False,
+                 codec: str = "h264", cam_type: str = "analytics"):
         self.url = url
         self.width = width
         self.height = height
         self.process = None
 
-        cmd = [
-            FFMPEG,
-            "-rtsp_transport", "tcp",
-            # Prefer stable decode over ultra-low latency to avoid green/garbled bands.
-            "-fflags", "+genpts+discardcorrupt",
-            "-flags", "low_delay",
-            "-vsync", "0",
-        ]
+        cmd = [FFMPEG, "-rtsp_transport", "tcp"]
+
+        if cam_type == "ptz":
+            # PTZ: minimize buffering for lowest possible latency
+            cmd += [
+                "-fflags", "nobuffer+genpts+discardcorrupt",
+                "-flags", "low_delay",
+                "-analyzeduration", "500000",
+                "-probesize", "1048576",
+                "-max_delay", "0",
+                "-reorder_queue_size", "0",
+                "-vsync", "0",
+                "-err_detect", "ignore_err",
+            ]
+        else:
+            # Analytics: prefer stable decode over ultra-low latency
+            cmd += [
+                "-fflags", "+genpts+discardcorrupt",
+                "-flags", "low_delay",
+                "-vsync", "0",
+            ]
         if gpu:
             cuvid = "hevc_cuvid" if codec == "hevc" else "h264_cuvid"
             cmd += ["-hwaccel", "cuda", "-c:v", cuvid]
@@ -156,13 +173,17 @@ class FFmpegReader:
         ]
         self.cmd = cmd
         self.frame_size = width * height * 3
+        self._is_ptz = (cam_type == "ptz")
 
     def start(self):
+        # PTZ: minimal pipe buffer to avoid stale frames accumulating
+        # Analytics: larger buffer for stable decode
+        buf = self.frame_size if self._is_ptz else self.frame_size * 2
         self.process = subprocess.Popen(
             self.cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            bufsize=self.frame_size * 2,
+            bufsize=buf,
         )
 
     def read(self):

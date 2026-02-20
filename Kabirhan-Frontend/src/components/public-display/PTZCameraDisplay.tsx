@@ -7,16 +7,16 @@ import { BACKEND_HTTP_URL } from '../../config/backend';
 
 export const PTZCameraDisplay = () => {
     const { t } = useTranslation();
-    const { ptzCameras, activePTZCameraId } = useCameraStore();
+    const { ptzCameras, activePTZCameraId, setActivePTZCamera } = useCameraStore();
     const { race } = useRaceStore();
     const activeCamera = ptzCameras.find(cam => cam.id === activePTZCameraId);
 
     return (
         <div className="relative w-full h-full bg-[var(--background)]">
-            {/* Camera Feed — MJPEG (stable for rapid camera switching) */}
+            {/* Camera Feed — single persistent MJPEG connection, backend switches camera */}
             {activeCamera ? (
                 <MJPEGPlayer
-                    url={`${BACKEND_HTTP_URL}/stream/${activeCamera.id}`}
+                    url={`${BACKEND_HTTP_URL}/stream/ptz-live`}
                     cameraName={activeCamera.name}
                     className="absolute inset-0 w-full h-full"
                     objectFit="cover"
@@ -69,6 +69,7 @@ export const PTZCameraDisplay = () => {
                 {ptzCameras.map((cam, i) => (
                     <div
                         key={cam.id}
+                        onClick={() => setActivePTZCamera(cam.id)}
                         className={`
               w-8 h-6 rounded flex items-center justify-center text-xs font-medium cursor-pointer transition-colors
               ${cam.id === activePTZCameraId

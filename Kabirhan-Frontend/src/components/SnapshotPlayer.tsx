@@ -29,6 +29,8 @@ const SnapshotPlayerContent = ({
     const [src, setSrc] = useState(() => withCacheBust(url));
     const inFlightRef = useRef(true);
     const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const hasEverLoadedRef = useRef(false);
+    const consecutiveErrorsRef = useRef(0);
 
     const clearWatchdog = useCallback(() => {
         if (watchdogRef.current) {
@@ -39,7 +41,9 @@ const SnapshotPlayerContent = ({
 
     const armWatchdog = useCallback(() => {
         clearWatchdog();
-        const timeoutMs = Math.max(intervalMs * 2, 4000);
+        // Only use watchdog for initial connection — once loaded, skip it
+        if (hasEverLoadedRef.current) return;
+        const timeoutMs = Math.max(intervalMs * 3, 8000);
         watchdogRef.current = setTimeout(() => {
             inFlightRef.current = false;
             setStatus('offline');
@@ -83,16 +87,22 @@ const SnapshotPlayerContent = ({
                 onLoad={() => {
                     clearWatchdog();
                     inFlightRef.current = false;
+                    hasEverLoadedRef.current = true;
+                    consecutiveErrorsRef.current = 0;
                     setStatus('online');
                 }}
                 onError={() => {
                     clearWatchdog();
                     inFlightRef.current = false;
-                    setStatus('offline');
+                    consecutiveErrorsRef.current += 1;
+                    // Only show offline if never loaded, or 10+ consecutive errors
+                    if (!hasEverLoadedRef.current || consecutiveErrorsRef.current >= 10) {
+                        setStatus('offline');
+                    }
                 }}
             />
 
-            {status !== 'online' && (
+            {status !== 'online' && !hasEverLoadedRef.current && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70">
                     {status === 'connecting' ? (
                         <>

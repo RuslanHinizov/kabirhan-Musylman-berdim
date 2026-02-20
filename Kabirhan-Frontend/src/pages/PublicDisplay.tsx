@@ -119,6 +119,7 @@ export const PublicDisplay = () => {
                                 objectFit="cover"
                                 fallbackToMjpeg={isActive && state !== 'offline'}
                                 enabled={shouldEnable}
+                                hideBadge
                             />
                         );
                     })()}

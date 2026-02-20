@@ -185,6 +185,7 @@ export const ru = {
     ranking: {
         liveStandings: 'Текущий рейтинг',
         leader: 'Лидер:',
+        waitingForRace: 'Ожидание заезда...',
     },
 
     // Stream Players

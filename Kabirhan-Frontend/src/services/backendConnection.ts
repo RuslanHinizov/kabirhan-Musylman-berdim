@@ -181,7 +181,7 @@ const applyHorseRoster = (horses: HorseData[] | undefined) => {
 // Handle incoming messages from backend
 const handleBackendMessage = (message: BackendMessage) => {
     const { updateRankings, startRace, stopRace, setRaceConfig } = useRaceStore.getState();
-    const { updateAnalyticsCameraHorses, setActivePTZ } = useCameraStore.getState();
+    const { updateAnalyticsCameraHorses, batchUpdateCameraHorses, batchUpdateCameraStatuses, setActivePTZ } = useCameraStore.getState();
 
     switch (message.type) {
         // ============ RACE EVENTS ============
@@ -258,11 +258,15 @@ const handleBackendMessage = (message: BackendMessage) => {
             }
             // New payload: { cameras: { "analytics-1": ["red", ...], ... } }
             if (message.cameras) {
+                const horseUpdates: Record<string, string[]> = {};
                 Object.entries(message.cameras).forEach(([cameraId, horseIds]) => {
                     if (Array.isArray(horseIds)) {
-                        updateAnalyticsCameraHorses(cameraId, horseIds);
+                        horseUpdates[cameraId] = horseIds;
                     }
                 });
+                if (Object.keys(horseUpdates).length > 0) {
+                    batchUpdateCameraHorses(horseUpdates);
+                }
             }
             break;
 
@@ -271,6 +275,25 @@ const handleBackendMessage = (message: BackendMessage) => {
             if (message.cameraId) {
                 setActivePTZ(message.cameraId);
             }
+            break;
+
+        case 'camera_status':
+            // Camera health status broadcast — single batch update (avoids N re-renders)
+            if (message.cameras) {
+                const statusUpdates: Record<string, 'online' | 'offline'> = {};
+                Object.entries(message.cameras).forEach(([cameraId, status]) => {
+                    const s = status as { online?: boolean; fps?: number; latency_ms?: number };
+                    statusUpdates[cameraId] = s.online ? 'online' : 'offline';
+                });
+                if (Object.keys(statusUpdates).length > 0) {
+                    batchUpdateCameraStatuses(statusUpdates);
+                }
+            }
+            break;
+
+        case 'alert':
+            // System alert from backend
+            console.warn(`[Alert] ${message.alert_type}: ${message.message}`);
             break;
 
         // ============ SYSTEM EVENTS ============

@@ -26,6 +26,7 @@ const MJPEGPlayerContent = ({
     const [imgKey, setImgKey] = useState(0);
     const mountedRef = useRef(true);
     const loadedRef = useRef(false);
+    const hasEverLoadedRef = useRef(false);
     const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const clearRetryTimer = useCallback(() => {
@@ -41,7 +42,10 @@ const MJPEGPlayerContent = ({
         retryTimerRef.current = setTimeout(() => {
             if (!mountedRef.current) return;
             loadedRef.current = false;
-            setStatus('connecting');
+            // Only show connecting if we've never loaded a frame
+            if (!hasEverLoadedRef.current) {
+                setStatus('connecting');
+            }
             setImgKey(k => k + 1);
         }, delayMs);
     }, [clearRetryTimer]);
@@ -54,8 +58,9 @@ const MJPEGPlayerContent = ({
         };
     }, [clearRetryTimer]);
 
-    // Connection watchdog: if first frame doesn't arrive quickly, force reconnect.
+    // Connection watchdog: only for initial connection. Once loaded, skip watchdog.
     useEffect(() => {
+        if (hasEverLoadedRef.current) return;
         loadedRef.current = false;
         const watchdog = setTimeout(() => {
             if (!mountedRef.current) return;
@@ -63,19 +68,23 @@ const MJPEGPlayerContent = ({
                 setStatus('offline');
                 reconnect(1200);
             }
-        }, 8000);
+        }, 10000);
         return () => clearTimeout(watchdog);
     }, [imgKey, url, reconnect]);
 
     const handleLoad = () => {
         loadedRef.current = true;
+        hasEverLoadedRef.current = true;
         clearRetryTimer();
         setStatus('online');
     };
 
     const handleError = () => {
         loadedRef.current = false;
-        setStatus('offline');
+        // Only show offline if we've never successfully loaded
+        if (!hasEverLoadedRef.current) {
+            setStatus('offline');
+        }
         reconnect(1800);
     };
 
@@ -94,7 +103,7 @@ const MJPEGPlayerContent = ({
             />
 
             {/* Status Overlay */}
-            {showStatusOverlay && status !== 'online' && (
+            {showStatusOverlay && status !== 'online' && !hasEverLoadedRef.current && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80">
                     {status === 'connecting' && (
                         <>

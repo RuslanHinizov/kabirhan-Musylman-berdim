@@ -102,9 +102,15 @@ class SimpleColorCNN(nn.Module):
 
 
 class ColorClassifier:
-    def __init__(self):
+    def __init__(self, model_path: str = None):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        ckpt = torch.load("models/color_classifier.pt", map_location=self.device, weights_only=False)
+        if model_path is None:
+            try:
+                from api.config import MODEL_PATH_COLOR
+                model_path = MODEL_PATH_COLOR
+            except ImportError:
+                model_path = "models/color_classifier.pt"
+        ckpt = torch.load(model_path, map_location=self.device, weights_only=False)
         self.classes = ckpt['classes']
         self.model = SimpleColorCNN().to(self.device)
         self.model.load_state_dict(ckpt['model_state_dict'])
@@ -155,9 +161,15 @@ def analyze_hsv(crop_bgr):
 
 
 class RaceTracker:
-    def __init__(self, output_dir, save_crops=False):
-        print("Loading YOLO...")
-        self.yolo = YOLO("yolov8s.pt")
+    def __init__(self, output_dir, save_crops=False, yolo_model: str = None):
+        if yolo_model is None:
+            try:
+                from api.config import MODEL_PATH_YOLO
+                yolo_model = MODEL_PATH_YOLO
+            except ImportError:
+                yolo_model = "yolov8s.pt"
+        print(f"Loading YOLO ({yolo_model})...")
+        self.yolo = YOLO(yolo_model)
         print("Loading classifier...")
         self.classifier = ColorClassifier()
         print(f"  Classes: {self.classifier.classes}")
@@ -212,13 +224,29 @@ class RaceTracker:
             return None
         return frame[ty1:ty2, tx1:tx2]
 
+    def _run_yolo(self, frame_or_frames):
+        """Run YOLO inference on one frame or a batch of frames."""
+        _dev = 0 if torch.cuda.is_available() else "cpu"
+        return self.yolo(
+            frame_or_frames, imgsz=IMGSZ, conf=DETECTION_CONF, iou=DETECTION_IOU,
+            classes=[0], device=_dev, half=torch.cuda.is_available(),
+            verbose=False
+        )
+
+    def update_batch(self, frames: list) -> list:
+        """Process multiple frames, one per camera.
+
+        Returns a list of (jockeys, detections) tuples, one per input frame.
+        Each frame runs through the full detection pipeline sequentially.
+        Primary speedup comes from TensorRT engine, not batching.
+        """
+        if not frames:
+            return []
+        return [self.update(frame) for frame in frames]
+
     def update(self, frame):
         self.frame_num += 1
-
-        results = self.yolo(
-            frame, imgsz=IMGSZ, conf=DETECTION_CONF, iou=DETECTION_IOU,
-            classes=[0], device="cuda:0", half=True, verbose=False
-        )
+        results = self._run_yolo(frame)
 
         detections = []
 

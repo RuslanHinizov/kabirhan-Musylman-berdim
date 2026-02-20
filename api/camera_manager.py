@@ -14,6 +14,7 @@ Architecture:
         ↓ status tracking + auto-reconnect
 """
 
+import os
 import time
 import logging
 import threading
@@ -49,7 +50,7 @@ class CameraReader(threading.Thread):
 
     # Output caps keep 25+ camera mode stable under heavy RTSP loads.
     MAX_WIDTH_ANALYTICS = 1280
-    MAX_WIDTH_PTZ = 1600
+    MAX_WIDTH_PTZ = 1920
 
     def __init__(self, cam_id: str, rtsp_url: str, use_gpu: bool = True,
                  cam_type: str = "analytics"):
@@ -63,8 +64,10 @@ class CameraReader(threading.Thread):
         self.running = False
         self._stop_event = threading.Event()
 
-        # Thread-safe frame buffer
-        self._frame: Optional[np.ndarray] = None
+        # Double-buffer frame storage: writer fills _write_idx, readers get 1-_write_idx
+        # Lock is only held for the integer swap — nanoseconds instead of frame-copy time
+        self._buffers: list[Optional[np.ndarray]] = [None, None]
+        self._write_idx: int = 0
         self._frame_lock = threading.Lock()
         self._frame_width: int = 0
         self._frame_height: int = 0
@@ -73,9 +76,9 @@ class CameraReader(threading.Thread):
         self._state: str = self.IDLE
         self._state_lock = threading.Lock()
 
-        # Reconnect settings
-        self._base_delay = 1.0
-        self._max_delay = 30.0
+        # Reconnect settings (keep backoff short for real-time racing)
+        self._base_delay = 0.5
+        self._max_delay = 8.0
         self._current_delay = self._base_delay
 
         # FPS tracking
@@ -91,6 +94,9 @@ class CameraReader(threading.Thread):
         self._cached_codec: Optional[str] = None
         self._cached_source_resolution: Optional[tuple[int, int]] = None
         self._cached_output_resolution: Optional[tuple[int, int]] = None
+
+        # Frame timestamp for WebRTC stale detection
+        self._frame_timestamp: float = 0.0
 
     def run(self):
         """Main thread loop — connect, read frames, auto-reconnect."""
@@ -119,7 +125,7 @@ class CameraReader(threading.Thread):
         url_display = self.rtsp_url.split('@')[-1] if '@' in self.rtsp_url else self.rtsp_url
         log.info(f"[{self.cam_id}] Connecting to: {url_display}")
 
-        # Detect codec (cached after first success)
+        # Detect codec (cached after first success — codec doesn't change at runtime)
         if self._cached_codec:
             codec = self._cached_codec
         else:
@@ -127,16 +133,15 @@ class CameraReader(threading.Thread):
             self._cached_codec = codec
         log.info(f"[{self.cam_id}] Codec: {codec}")
 
-        # Get source resolution (cached after first success)
+        # Use cached resolution for fast reconnect; re-probe only on first connect.
+        # Resolution mismatch is detected from the first frame (see below).
         if self._cached_source_resolution:
             w, h = self._cached_source_resolution
         else:
             w, h = parse_resolution(self.rtsp_url)
             if w == 0 or h == 0:
                 log.error(f"[{self.cam_id}] Could not detect resolution via probe, trying OpenCV direct...")
-                # Last-resort: try OpenCV to grab one frame and get resolution
                 try:
-                    import cv2
                     cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
                     if cap.isOpened():
                         ret, frame = cap.read()
@@ -165,14 +170,21 @@ class CameraReader(threading.Thread):
             log.info(f"[{self.cam_id}] Resolution: {w}x{h}, GPU: {self.use_gpu}, Type: {self.cam_type}")
 
         # Create FFmpegReader
-        reader = FFmpegReader(self.rtsp_url, out_w, out_h, gpu=self.use_gpu, codec=codec)
+        reader = FFmpegReader(self.rtsp_url, out_w, out_h, gpu=self.use_gpu,
+                              codec=codec, cam_type=self.cam_type)
         reader.start()
         self._reader = reader
 
-        # Verify first frame comes through
-        first_ret, first_frame = reader.read()
-        if not first_ret or first_frame is None:
-            log.error(f"[{self.cam_id}] FFmpegReader started but first frame failed, "
+        # Verify first frame comes through (retry a few times for unstable networks)
+        first_frame = None
+        for attempt in range(5):
+            first_ret, first_frame = reader.read()
+            if first_ret and first_frame is not None:
+                break
+            time.sleep(0.1)
+
+        if first_frame is None:
+            log.error(f"[{self.cam_id}] FFmpegReader started but first frame failed after 5 attempts, "
                       f"resolution might be wrong ({w}x{h})")
             reader.release()
             self._reader = None
@@ -194,12 +206,28 @@ class CameraReader(threading.Thread):
             self._connect_and_read_opencv()
             return
 
-        # Store first frame
+        # Detect resolution change at runtime (Hikvision cameras may auto-switch)
+        actual_h, actual_w = first_frame.shape[:2]
+        if actual_w != out_w or actual_h != out_h:
+            log.warning(f"[{self.cam_id}] Resolution changed: expected {out_w}x{out_h}, "
+                        f"got {actual_w}x{actual_h} — updating cache and restarting")
+            reader.release()
+            self._reader = None
+            # Invalidate cache so next attempt uses actual resolution
+            self._cached_source_resolution = None
+            self._cached_output_resolution = None
+            return  # Will reconnect with correct resolution via run() loop
+
+        # Store first frame via double-buffer swap
+        now = time.time()
+        wi = self._write_idx
+        self._buffers[wi] = first_frame
         with self._frame_lock:
-            self._frame = first_frame
+            self._write_idx = 1 - wi
             self._frame_width = out_w
             self._frame_height = out_h
-            self._last_frame_time = time.time()
+            self._last_frame_time = now
+            self._frame_timestamp = now
 
         self._set_state(self.RUNNING)
         self._current_delay = self._base_delay  # Reset backoff on success
@@ -210,11 +238,18 @@ class CameraReader(threading.Thread):
 
         # Read loop
         bad_frames = 0
+        consecutive_read_failures = 0
+        max_ffmpeg_failures = 10 if self.cam_type == "ptz" else 5
         while self.running and not self._stop_event.is_set():
             ret, frame = reader.read()
             if not ret:
-                log.warning(f"[{self.cam_id}] Frame read failed, reconnecting...")
-                break
+                consecutive_read_failures += 1
+                if consecutive_read_failures >= max_ffmpeg_failures:
+                    log.warning(f"[{self.cam_id}] Frame read failed {consecutive_read_failures}x, reconnecting...")
+                    break
+                time.sleep(0.02)
+                continue
+            consecutive_read_failures = 0
 
             if self._is_obviously_corrupted(frame):
                 bad_frames += 1
@@ -224,12 +259,16 @@ class CameraReader(threading.Thread):
                 continue
             bad_frames = 0
 
-            # Store frame (thread-safe)
+            # Store frame via double-buffer swap (lock held only for index swap)
+            now = time.time()
+            wi = self._write_idx
+            self._buffers[wi] = frame
             with self._frame_lock:
-                self._frame = frame
+                self._write_idx = 1 - wi
                 self._frame_width = out_w
                 self._frame_height = out_h
-                self._last_frame_time = time.time()
+                self._last_frame_time = now
+                self._frame_timestamp = now
 
             # FPS tracking
             self._frame_count += 1
@@ -255,9 +294,13 @@ class CameraReader(threading.Thread):
         """Fallback decoder path using OpenCV VideoCapture."""
         self._set_state(self.CONNECTING)
         log.info(f"[{self.cam_id}] OpenCV fallback decoder starting")
+        # Force TCP transport to reduce packet loss over Mikrotik/routed networks
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
         cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
         cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 15000)
         cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 15000)
+        # Minimize internal buffer to reduce latency
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         if not cap.isOpened():
             log.error(f"[{self.cam_id}] OpenCV fallback failed to open stream")
@@ -282,11 +325,15 @@ class CameraReader(threading.Thread):
             return
 
         h, w = first_frame.shape[:2]
+        now = time.time()
+        wi = self._write_idx
+        self._buffers[wi] = first_frame
         with self._frame_lock:
-            self._frame = first_frame
+            self._write_idx = 1 - wi
             self._frame_width = w
             self._frame_height = h
-            self._last_frame_time = time.time()
+            self._last_frame_time = now
+            self._frame_timestamp = now
 
         self._set_state(self.RUNNING)
         self._current_delay = self._base_delay
@@ -295,11 +342,20 @@ class CameraReader(threading.Thread):
         log.info(f"[{self.cam_id}] ✅ OpenCV fallback streaming ({w}x{h})")
 
         bad_frames = 0
+        consecutive_read_failures = 0
+        # Tolerate transient failures (Mikrotik/routed networks have packet loss)
+        max_read_failures = 20 if self.cam_type == "ptz" else 10
         while self.running and not self._stop_event.is_set():
             ret, frame = cap.read()
             if not ret or frame is None:
-                log.warning(f"[{self.cam_id}] OpenCV fallback frame read failed, reconnecting...")
-                break
+                consecutive_read_failures += 1
+                if consecutive_read_failures >= max_read_failures:
+                    log.warning(f"[{self.cam_id}] OpenCV fallback: {consecutive_read_failures} consecutive read failures, reconnecting...")
+                    break
+                # Brief pause before retry to let network recover
+                time.sleep(0.05)
+                continue
+            consecutive_read_failures = 0
 
             if target_w and target_h and (frame.shape[1] != target_w or frame.shape[0] != target_h):
                 frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
@@ -312,11 +368,16 @@ class CameraReader(threading.Thread):
                 continue
             bad_frames = 0
 
+            # Store frame via double-buffer swap
+            now = time.time()
+            wi = self._write_idx
+            self._buffers[wi] = frame
             with self._frame_lock:
-                self._frame = frame
+                self._write_idx = 1 - wi
                 self._frame_width = frame.shape[1]
                 self._frame_height = frame.shape[0]
-                self._last_frame_time = time.time()
+                self._last_frame_time = now
+                self._frame_timestamp = now
 
             self._frame_count += 1
             elapsed = time.time() - self._fps_start_time
@@ -338,9 +399,20 @@ class CameraReader(threading.Thread):
             self._reader = None
 
     def get_frame(self) -> Optional[np.ndarray]:
-        """Get the latest frame (thread-safe). Returns None if no frame available."""
+        """Get the latest frame (thread-safe, zero-copy).
+
+        Returns a reference to the read buffer. The frame is stable until the
+        writer thread produces the NEXT frame, so callers that process
+        immediately (MJPEG encode, detection, WebRTC) are safe.
+        """
         with self._frame_lock:
-            return self._frame.copy() if self._frame is not None else None
+            read_idx = 1 - self._write_idx
+        return self._buffers[read_idx]
+
+    def get_frame_timestamp(self) -> float:
+        """Get the timestamp of the latest frame."""
+        with self._frame_lock:
+            return self._frame_timestamp
 
     def get_frame_dimensions(self) -> tuple:
         """Get current frame dimensions (width, height)."""
@@ -487,9 +559,9 @@ class VideoFileReader(threading.Thread):
         self.running = False
 
     def get_frame(self, cam_id: str) -> Optional[np.ndarray]:
+        """Zero-copy frame access — safe because callers process immediately."""
         with self._frame_lock:
-            frame = self._frames.get(cam_id)
-            return frame.copy() if frame is not None else None
+            return self._frames.get(cam_id)
 
     def get_active_cam_id(self) -> str:
         return self._active_cam_id

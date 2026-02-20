@@ -11,6 +11,7 @@ interface WebRTCPlayerProps {
     objectFit?: 'cover' | 'contain';
     fallbackToMjpeg?: boolean;  // Fall back to MJPEG if WebRTC fails
     enabled?: boolean;          // If false, don't open a WebRTC connection
+    hideBadge?: boolean;        // Hide camera info badge (for PublicDisplay overlay)
 }
 
 export const WebRTCPlayer = ({
@@ -20,6 +21,7 @@ export const WebRTCPlayer = ({
     objectFit = 'cover',
     fallbackToMjpeg = true,
     enabled = true,
+    hideBadge = false,
 }: WebRTCPlayerProps) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -197,6 +199,7 @@ export const WebRTCPlayer = ({
                 cameraName={cameraName}
                 className={className}
                 objectFit={objectFit}
+                showInfoBadge={!hideBadge}
             />
         );
     }
@@ -234,20 +237,22 @@ export const WebRTCPlayer = ({
             )}
 
             {/* Camera Info Badge */}
-            <div className="absolute top-2 left-2 flex items-center gap-2">
-                <div className={`
-                    flex items-center gap-1.5 px-2 py-1 rounded text-xs font-medium
-                    ${status === 'online' ? 'bg-green-600' :
-                        status === 'connecting' ? 'bg-blue-600' : 'bg-red-600'}
-                    text-white
-                `}>
-                    <Wifi className="w-3 h-3" />
-                    {cameraName}
-                    {status === 'online' && (
-                        <span className="text-green-200 text-[10px] ml-1">{t('stream.webrtcLabel')}</span>
-                    )}
+            {!hideBadge && (
+                <div className="absolute top-2 left-2 flex items-center gap-2">
+                    <div className={`
+                        flex items-center gap-1.5 px-2 py-1 rounded text-xs font-medium
+                        ${status === 'online' ? 'bg-green-600' :
+                            status === 'connecting' ? 'bg-blue-600' : 'bg-red-600'}
+                        text-white
+                    `}>
+                        <Wifi className="w-3 h-3" />
+                        {cameraName}
+                        {status === 'online' && (
+                            <span className="text-green-200 text-[10px] ml-1">{t('stream.webrtcLabel')}</span>
+                        )}
+                    </div>
                 </div>
-            </div>
+            )}
         </div>
     );
 };

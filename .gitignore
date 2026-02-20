@@ -4,6 +4,9 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Environment (secrets)
+.env
+
 # Node
 node_modules/
 dist/
@@ -12,6 +15,8 @@ dist-ssr/
 
 # Models (large binary files)
 *.pt
+*.engine
+*.onnx
 models/
 
 # But keep our trained classifier

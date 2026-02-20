@@ -35,12 +35,12 @@ class CameraDetectionState:
     kept globally: smooth_x, speed, filter state, voting, etc.
     """
 
-    # Filter thresholds (same as original DetectionLoop)
-    CONF_THRESHOLD = 0.45       # F1: min classifier confidence
-    HSV_SKIP_CONF = 0.80        # F2: skip HSV check if CNN conf > this
-    MAX_SPEED_MPS = 160.0       # F3: more tolerant for real RTSP jitter
-    TEMPORAL_WINDOW = 4          # F4: sliding window (frames)
-    TEMPORAL_MIN = 1             # F4: allow low-latency confirmation
+    # Filter thresholds — tuned for accuracy over speed
+    CONF_THRESHOLD = 0.55       # F1: min classifier confidence (was 0.45)
+    HSV_SKIP_CONF = 0.85        # F2: skip HSV check only with very high CNN conf (was 0.80)
+    MAX_SPEED_MPS = 160.0       # F3: tolerant for real RTSP jitter
+    TEMPORAL_WINDOW = 6          # F4: sliding window frames (was 4)
+    TEMPORAL_MIN = 2             # F4: require 2+ frames confirmation (was 1)
     CAMERA_TRACK_M = 100.0       # each analytics camera = 100 meters
 
     # How long (seconds) a color stays valid in smooth_x after last detection
@@ -59,9 +59,9 @@ class CameraDetectionState:
         # Per-color last-seen timestamp (for staleness eviction)
         self.color_last_seen: dict[str, float] = {}
 
-        # Speed tracking per color (m/s, EMA, alpha=0.15)
+        # Speed tracking per color (m/s, EMA, alpha=0.08 for smoother output)
         self.speed: dict[str, float] = {}
-        self.speed_alpha = 0.15
+        self.speed_alpha = 0.08
 
         # Last known position per color: (pos_m, timestamp)
         self.last_pos: dict[str, tuple] = {}
@@ -72,10 +72,10 @@ class CameraDetectionState:
         # Detection frame counter
         self.frame_number: int = 0
 
-        # Voting for color order
+        # Voting for color order — larger window for stability
         self.live_votes: list = []
-        self.LIVE_VOTE_WINDOW = 15
-        self.LIVE_MIN_VOTES = 5
+        self.LIVE_VOTE_WINDOW = 20     # was 15
+        self.LIVE_MIN_VOTES = 8        # was 5
         self.current_order: list = []
         self.order_changes: int = 0
 
@@ -214,11 +214,16 @@ class SmartDetectionScheduler:
     4. Handle horse handoff between adjacent cameras
     """
 
-    # Configuration
-    MAX_CAMERAS_PER_CYCLE = 5      # Max cameras to YOLO per cycle (~100ms budget)
-    HIGH_PRIORITY_INTERVAL = 0.10  # 10 fps
-    LOW_PRIORITY_INTERVAL = 0.50   # 2 fps
-    IDLE_SCAN_INTERVAL = 2.0       # 0.5 fps
+    # Configuration — tuned for RTX 3060 with TensorRT (~10-12ms/frame)
+    try:
+        from api.config import _env_int
+        MAX_CAMERAS_PER_CYCLE = _env_int("MAX_CAMERAS_PER_CYCLE", 8)
+    except ImportError:
+        MAX_CAMERAS_PER_CYCLE = 8
+
+    HIGH_PRIORITY_INTERVAL = 0.08  # 12.5 fps (tuned for RTX 3060)
+    LOW_PRIORITY_INTERVAL = 0.35   # ~3 fps
+    IDLE_SCAN_INTERVAL = 1.5       # ~0.7 fps
 
     # Handoff: when horse X position > this fraction of frame width → expect at next camera
     HANDOFF_THRESHOLD = 0.85

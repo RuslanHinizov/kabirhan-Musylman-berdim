@@ -185,6 +185,7 @@ export const kk = {
     ranking: {
         liveStandings: 'Ағымдағы рейтинг',
         leader: 'Көшбасшы:',
+        waitingForRace: 'Жарысты күтуде...',
     },
 
     // Stream Players

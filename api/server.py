@@ -1,26 +1,3 @@
-"""
-Race Vision — FastAPI Backend Server (Multi-Camera Architecture)
-
-Supports 25 analytics cameras (YOLO detection) + 4 PTZ cameras (broadcast only).
-Uses GPU-accelerated RTSP decode (NVDEC) and WebRTC streaming.
-
-Architecture:
-    25 Analytics RTSP → CameraReader threads → MultiCameraManager
-    4 PTZ RTSP       → CameraReader threads → MultiCameraManager
-                                                    ↓
-    SmartDetectionScheduler → MultiDetectionLoop → per-camera state
-                                                    ↓
-    RankingMerger → combined rankings → WebSocket broadcast
-                                                    ↓
-    WebRTC/MJPEG streams → Frontend (operator + public display)
-
-Usage:
-    python api/server.py                                    # RTSP mode (configure cameras via API)
-    python api/server.py --video video/cam1.mp4 video/cam2.mp4  # Video file test mode
-    python api/server.py --gpu                              # Enable GPU decode
-    python api/server.py --auto-start                       # Auto-start race
-"""
-
 import cv2
 import sys
 import time
@@ -67,37 +44,23 @@ from api.ranking_merger import RankingMerger
 from api.webrtc_server import setup_webrtc_routes, WEBRTC_AVAILABLE
 
 # ============================================================
-# CONFIGURATION
+# CONFIGURATION (loaded from .env via api/config.py)
 # ============================================================
 
-DEFAULT_RTSP_URL = "rtsp://admin:Qaz445566@192.168.18.59:554//stream"
-SERVER_HOST = "0.0.0.0"
-SERVER_PORT = 8000
+from api.config import (
+    DEFAULT_RTSP_URL, SERVER_HOST, SERVER_PORT,
+    DETECTION_INTERVAL, PREVIEW_DETECTION_INTERVAL,
+    PREVIEW_MAX_CAMERAS_PER_CYCLE, PREVIEW_ACCESS_FRESHNESS_SEC,
+    BROADCAST_INTERVAL,
+    MJPEG_QUALITY, MJPEG_FPS, MAX_ANNOTATED_FRAME_AGE_SEC,
+    PTZ_GPU_ANALYTICS_THRESHOLD,
+    TRACK_LENGTH, NUM_ANALYTICS_CAMERAS, NUM_PTZ_CAMERAS, CAMERA_TRACK_M,
+    MODEL_PATH_YOLO, MODEL_PATH_COLOR, DETECTION_MODE,
+)
+from api import config as cfg
 
-# Detection loop rate (seconds between updates)
-DETECTION_INTERVAL = 0.10  # ~10 fps
-# Lightweight preview detection when race is not started yet
-PREVIEW_DETECTION_INTERVAL = 0.35
-PREVIEW_MAX_CAMERAS_PER_CYCLE = 5
-PREVIEW_ACCESS_FRESHNESS_SEC = 8.0
-
-# WebSocket broadcast rate
-BROADCAST_INTERVAL = 0.20  # 5 Hz
-
-# MJPEG settings (fallback)
-MJPEG_QUALITY = 75
-MJPEG_FPS = 25
-MAX_ANNOTATED_FRAME_AGE_SEC = 0.9
-PTZ_GPU_ANALYTICS_THRESHOLD = 8
-
-# Track mapping
-TRACK_LENGTH = 2500
-NUM_ANALYTICS_CAMERAS = 25
-NUM_PTZ_CAMERAS = 4
-CAMERA_TRACK_M = 100.0  # Each analytics camera covers 100m
-
-# GPU settings
-USE_GPU = False  # Set via --gpu flag
+# GPU settings — mutable, overridden by --gpu CLI flag
+USE_GPU = cfg.USE_GPU
 
 # ============================================================
 # COLOR → HORSE MAPPING (matches frontend SILK_COLORS)
@@ -121,6 +84,9 @@ RACE_SETTINGS = {
     "startFinishPosition": 0,
 }
 RACE_STATUS = "pending"
+
+# Active PTZ camera for public display — changes instantly on operator switch
+active_ptz_id = "ptz-1"
 
 # ============================================================
 # LOGGING
@@ -180,10 +146,23 @@ configure_clean_logging()
 # ============================================================
 
 class SharedState:
-    """Thread-safe state shared between camera manager, detector, and server."""
+    """Thread-safe state shared between camera manager, detector, and server.
+
+    Uses separate locks for independent data groups to reduce contention:
+    - _frame_lock: annotated frames + per-camera detections + presence
+    - _ranking_lock: combined rankings
+    - _metrics_lock: FPS, cycle time, counters
+    - _stream_lock: stream access timestamps
+
+    This allows e.g. MJPEG threads to read frames while detection thread
+    writes rankings, without blocking each other.
+    """
 
     def __init__(self):
-        self._lock = threading.Lock()
+        self._frame_lock = threading.Lock()
+        self._ranking_lock = threading.Lock()
+        self._metrics_lock = threading.Lock()
+        self._stream_lock = threading.Lock()
 
         # Per-camera annotated frames (cam_id string → numpy array)
         self.annotated_frames: dict[str, np.ndarray] = {}
@@ -204,6 +183,11 @@ class SharedState:
         self.detection_fps: float = 0.0
         self.detection_count: int = 0
 
+        # Performance metrics
+        self.last_cycle_ms: float = 0.0
+        self.cameras_per_cycle: int = 0
+        self.model_type: str = "pytorch"  # "pytorch" or "tensorrt"
+
         # Legacy compatibility for video mode
         self.video_index: int = 0
         self.active_cam_id: str = ""
@@ -212,34 +196,38 @@ class SharedState:
                               annotated: np.ndarray, horse_colors: set):
         """Store detection results for a specific camera."""
         now = time.time()
-        with self._lock:
+        with self._frame_lock:
             self.per_camera_detections[cam_id] = jockeys
             self.annotated_frames[cam_id] = annotated
             self.annotated_frame_times[cam_id] = now
             self.camera_horse_presence[cam_id] = horse_colors
+        with self._metrics_lock:
             self.detection_count += 1
 
     def get_annotated_frame(self, cam_id: str,
                             max_age_sec: Optional[float] = None) -> Optional[np.ndarray]:
-        """Get annotated frame for a specific camera by cam_id string."""
+        """Get annotated frame reference (zero-copy).
+
+        Safe for callers that encode immediately (MJPEG, WebRTC, snapshot).
+        """
         now = time.time()
-        with self._lock:
+        with self._frame_lock:
             frame = self.annotated_frames.get(cam_id)
             ts = self.annotated_frame_times.get(cam_id, 0.0)
             if frame is None:
                 return None
             if max_age_sec is not None and ts > 0 and (now - ts) > max_age_sec:
                 return None
-            return frame.copy()
+            return frame
 
     def set_combined_rankings(self, rankings: list):
         """Store the merged ranking list from all cameras."""
-        with self._lock:
+        with self._ranking_lock:
             self.combined_rankings = list(rankings) if rankings is not None else []
 
     def get_combined_rankings(self) -> list:
         """Get the current combined rankings."""
-        with self._lock:
+        with self._ranking_lock:
             return list(self.combined_rankings)
 
     # Legacy alias
@@ -247,21 +235,21 @@ class SharedState:
         return self.get_combined_rankings()
 
     def set_detection_fps(self, fps: float):
-        with self._lock:
+        with self._metrics_lock:
             self.detection_fps = fps
 
     def mark_stream_access(self, cam_id: str):
         """Record when an analytics camera stream/snapshot was requested."""
         if not cam_id.startswith("analytics-"):
             return
-        with self._lock:
+        with self._stream_lock:
             self.stream_access_times[cam_id] = time.time()
 
     def get_recent_stream_cameras(self, max_count: int = 4,
                                    freshness_sec: float = 8.0) -> list[str]:
         """Return recently requested analytics cameras, newest first."""
         now = time.time()
-        with self._lock:
+        with self._stream_lock:
             recent = [
                 (cam_id, ts)
                 for cam_id, ts in self.stream_access_times.items()
@@ -451,8 +439,9 @@ def reset_runtime_state():
     global RACE_STATUS
     state.race_active = False
     RACE_STATUS = "pending"
-    with state._lock:
+    with state._ranking_lock:
         state.combined_rankings = []
+    with state._frame_lock:
         state.camera_horse_presence.clear()
         state.per_camera_detections.clear()
         state.annotated_frames.clear()
@@ -515,50 +504,72 @@ class MultiDetectionLoop(threading.Thread):
     def run(self):
         self.running = True
         self._fps_timer = time.time()
+        self._consecutive_errors = 0
 
         output_dir = Path("results/race_server")
         output_dir.mkdir(parents=True, exist_ok=True)
-        self.tracker = RaceTracker(output_dir, save_crops=False)
-        log.info("Multi-camera detection pipeline ready")
+
+        # Retry tracker creation — TensorRT engine may fail on first attempt
+        while self.running and self.tracker is None:
+            try:
+                self.tracker = RaceTracker(output_dir, save_crops=False)
+                log.info("Multi-camera detection pipeline ready")
+            except Exception as e:
+                log.error(f"[DETECTION] Failed to create RaceTracker: {e}")
+                log.info("[DETECTION] Retrying in 5 seconds...")
+                time.sleep(5)
 
         while self.running:
-            if not state.race_active:
-                self._race_start_time = 0.0
-                # Keep a lightweight preview detector alive so operators can
-                # verify horses before pressing "Start race".
+            try:
+                if not state.race_active:
+                    self._race_start_time = 0.0
+                    # Keep a lightweight preview detector alive so operators can
+                    # verify horses before pressing "Start race".
+                    if self._video_mode:
+                        self._process_video_mode()
+                    else:
+                        self._process_preview_mode()
+                    time.sleep(PREVIEW_DETECTION_INTERVAL)
+                    self._consecutive_errors = 0
+                    continue
+
+                # Start race timer on first active frame
+                if self._race_start_time == 0.0:
+                    self._race_start_time = time.time()
+                    self.merger.set_race_start_time(self._race_start_time)
+
+                t0 = time.time()
+
                 if self._video_mode:
                     self._process_video_mode()
                 else:
-                    self._process_preview_mode()
-                time.sleep(PREVIEW_DETECTION_INTERVAL)
-                continue
+                    self._process_multi_camera()
 
-            # Start race timer on first active frame
-            if self._race_start_time == 0.0:
-                self._race_start_time = time.time()
-                self.merger.set_race_start_time(self._race_start_time)
+                # FPS tracking
+                self._fps_counter += 1
+                dt = time.time() - t0
+                with state._metrics_lock:
+                    state.last_cycle_ms = dt * 1000.0
+                elapsed_fps = time.time() - self._fps_timer
+                if elapsed_fps >= 1.0:
+                    self._current_fps = self._fps_counter / elapsed_fps
+                    self._fps_counter = 0
+                    self._fps_timer = time.time()
+                    state.set_detection_fps(self._current_fps)
 
-            t0 = time.time()
+                # Rate limit
+                sleep_time = DETECTION_INTERVAL - dt
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
 
-            if self._video_mode:
-                self._process_video_mode()
-            else:
-                self._process_multi_camera()
+                self._consecutive_errors = 0
 
-            # FPS tracking
-            self._fps_counter += 1
-            elapsed_fps = time.time() - self._fps_timer
-            if elapsed_fps >= 1.0:
-                self._current_fps = self._fps_counter / elapsed_fps
-                self._fps_counter = 0
-                self._fps_timer = time.time()
-                state.set_detection_fps(self._current_fps)
-
-            # Rate limit
-            dt = time.time() - t0
-            sleep_time = DETECTION_INTERVAL - dt
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+            except Exception as e:
+                self._consecutive_errors += 1
+                if self._consecutive_errors <= 3 or self._consecutive_errors % 50 == 0:
+                    log.error(f"[DETECTION] Cycle error ({self._consecutive_errors}x): {e}")
+                # Back off to avoid CPU spin on repeated failures
+                time.sleep(min(2.0, 0.5 * self._consecutive_errors))
 
     def _process_preview_mode(self):
         """Run low-rate detection preview before race start."""
@@ -685,14 +696,15 @@ class MultiDetectionLoop(threading.Thread):
 
         frame_widths = {}
 
+        # Pre-fetch all frames at once (minimizes lock contention)
+        frames_batch = {}
         for cam_id in cameras_to_process:
             frame = camera_manager.get_frame(cam_id)
-            if frame is None:
-                continue
+            if frame is not None and cam_id in self.camera_states:
+                frames_batch[cam_id] = frame
 
-            cam_state = self.camera_states.get(cam_id)
-            if cam_state is None:
-                continue
+        for cam_id, frame in frames_batch.items():
+            cam_state = self.camera_states[cam_id]
 
             cam_state.last_process_time = time.time()
             cam_state.frame_number += 1
@@ -702,8 +714,13 @@ class MultiDetectionLoop(threading.Thread):
             # Run YOLO + color classification
             jockeys, detections = self.tracker.update(frame)
 
-            # Draw annotations
-            annotated = draw(frame.copy(), jockeys, self.tracker)
+            # Lazy annotation: only draw if someone is watching this camera.
+            # Check stream access time — if no viewer accessed in last 5s, skip draw.
+            last_access = state.stream_access_times.get(cam_id, 0.0)
+            if time.time() - last_access < 5.0:
+                annotated = draw(frame.copy(), jockeys, self.tracker)
+            else:
+                annotated = frame  # raw frame, no annotation overhead
 
             # Evict stale colors that haven't been seen recently
             cam_state.evict_stale_colors()
@@ -879,8 +896,11 @@ class MultiDetectionLoop(threading.Thread):
             if color in cam_state.last_pos:
                 prev_pos_m, prev_time = cam_state.last_pos[color]
                 dt_speed = time.time() - prev_time
-                if dt_speed > 0.01:
+                # Require at least 50ms between samples to avoid jitter from scheduling
+                if dt_speed > 0.05:
                     raw_speed = abs(pos_m - prev_pos_m) / dt_speed
+                    # Cap at realistic horse race speed (~25 m/s = 90 km/h)
+                    raw_speed = min(raw_speed, 25.0)
                     cam_state.update_speed(color, raw_speed)
 
             # Update position tracking
@@ -938,19 +958,23 @@ async def lifespan(app: FastAPI):
     install_asyncio_exception_filter()
     ranking_task = asyncio.create_task(ranking_broadcast_loop())
     camera_detection_task = asyncio.create_task(camera_detection_broadcast_loop())
+    camera_status_task = asyncio.create_task(camera_status_broadcast_loop())
 
     log.info(f"Race Vision backend running on http://{SERVER_HOST}:{SERVER_PORT}")
     log.info(f"  WebSocket: ws://localhost:{SERVER_PORT}/ws")
     log.info(f"  MJPEG:     http://localhost:{SERVER_PORT}/stream/cam1")
     log.info(f"  WebRTC:    {'enabled' if WEBRTC_AVAILABLE else 'disabled (install aiortc)'}")
     log.info(f"  Health:    http://localhost:{SERVER_PORT}/api/system/health")
+    log.info(f"  Metrics:   http://localhost:{SERVER_PORT}/api/system/metrics")
 
     try:
         yield
     finally:
         ranking_task.cancel()
         camera_detection_task.cancel()
-        await asyncio.gather(ranking_task, camera_detection_task, return_exceptions=True)
+        camera_status_task.cancel()
+        await asyncio.gather(ranking_task, camera_detection_task, camera_status_task,
+                             return_exceptions=True)
 
 
 app = FastAPI(title="Race Vision Backend", lifespan=lifespan)
@@ -1056,14 +1080,20 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 async def broadcast(msg: dict):
-    """Send a message to all connected WebSocket clients."""
-    dead = set()
-    for client in list(ws_clients):
-        try:
-            await client.send_json(msg)
-        except Exception:
-            dead.add(client)
-    ws_clients.difference_update(dead)
+    """Send a message to all connected WebSocket clients (non-blocking)."""
+    if not ws_clients:
+        return
+    clients = list(ws_clients)
+    tasks = [asyncio.create_task(_ws_send_safe(c, msg)) for c in clients]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _ws_send_safe(client, msg: dict, timeout: float = 0.5):
+    """Send with timeout so one slow client doesn't block all others."""
+    try:
+        await asyncio.wait_for(client.send_json(msg), timeout=timeout)
+    except Exception:
+        ws_clients.discard(client)
 
 
 # ============================================================
@@ -1133,6 +1163,29 @@ async def stop_camera_endpoint(camera_id: str):
     camera_manager.stop_camera(camera_id)
     log.info(f"[CAMERA STOP] {camera_id}")
     return {"status": "stopped", "id": camera_id}
+
+
+@app.post("/api/ptz/active")
+async def set_active_ptz(request: Request):
+    """Set the active PTZ camera for the public display.
+    
+    The /stream/ptz-live endpoint immediately starts serving frames
+    from the new camera. No reconnection needed on client side.
+    """
+    global active_ptz_id
+    body = await request.json()
+    cam_id = body.get("cameraId", "ptz-1")
+    old = active_ptz_id
+    active_ptz_id = cam_id
+    if old != cam_id:
+        log.info(f"[PTZ SWITCH] {old} → {cam_id}")
+    return {"status": "ok", "activePtz": cam_id}
+
+
+@app.get("/api/ptz/active")
+async def get_active_ptz():
+    """Get the currently active PTZ camera ID."""
+    return {"activePtz": active_ptz_id}
 
 
 @app.get("/api/streams/status")
@@ -1220,6 +1273,148 @@ async def system_health():
     return health
 
 
+@app.get("/api/system/metrics")
+async def system_metrics():
+    """Detailed performance metrics for baseline measurement and monitoring."""
+    import torch
+    import os
+
+    cam_status = camera_manager.get_status()
+    analytics_running = sum(
+        1 for cid, s in cam_status.items()
+        if isinstance(s, dict) and s.get("state") == "running"
+        and cid.startswith("analytics")
+    )
+    ptz_running = sum(
+        1 for cid, s in cam_status.items()
+        if isinstance(s, dict) and s.get("state") == "running"
+        and cid.startswith("ptz")
+    )
+
+    # Per-camera frame age (latency proxy)
+    now = time.time()
+    per_camera = {}
+    for cam_id, info in cam_status.items():
+        if not isinstance(info, dict):
+            continue
+        frame_age = info.get("frameAgeSec", None)
+        per_camera[cam_id] = {
+            "state": info.get("state", "unknown"),
+            "fps": info.get("fps", 0),
+            "type": info.get("type", "unknown"),
+            "latency_ms": round(frame_age * 1000, 1) if frame_age is not None else None,
+        }
+
+    # WebRTC stats
+    try:
+        from api.webrtc_server import peer_connections
+        webrtc_count = len(peer_connections)
+    except Exception:
+        webrtc_count = 0
+
+    # Detect model type from file extension
+    model_type = "tensorrt" if MODEL_PATH_YOLO.endswith(".engine") else "pytorch"
+
+    metrics = {
+        "detection": {
+            "fps": round(state.detection_fps, 1),
+            "total_frames": state.detection_count,
+            "last_cycle_ms": round(state.last_cycle_ms, 1),
+            "cameras_per_cycle": state.cameras_per_cycle,
+            "race_active": state.race_active,
+            "model_type": model_type,
+            "model_path": MODEL_PATH_YOLO,
+            "mode": DETECTION_MODE,
+        },
+        "broadcast": {
+            "webrtc_connections": webrtc_count,
+        },
+        "cameras": {
+            "analytics_running": analytics_running,
+            "ptz_running": ptz_running,
+            "total_configured": len(CUSTOM_CAMERA_URLS),
+            "per_camera": per_camera,
+        },
+        "gpu": {
+            "cuda_available": torch.cuda.is_available(),
+            "device_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+            "memory_allocated_mb": round(torch.cuda.memory_allocated() / 1e6, 1) if torch.cuda.is_available() else 0,
+            "memory_reserved_mb": round(torch.cuda.memory_reserved() / 1e6, 1) if torch.cuda.is_available() else 0,
+        },
+        "system": {
+            "pid": os.getpid(),
+        },
+    }
+    return metrics
+
+
+# ============================================================
+# ANALYTICS INGEST ENDPOINT (External Detection Pipeline)
+# ============================================================
+
+from api.models import DetectionPayload, AlertItem
+
+@app.post("/api/analytics/detections")
+async def ingest_detections(payload: DetectionPayload):
+    """Receive detection metadata from an external analytics pipeline.
+
+    This endpoint enables decoupling: detection can run in a separate process
+    (DeepStream, dedicated GPU worker) and push results to the backend.
+    The backend applies the same ranking logic as the internal detection loop.
+    """
+    cam_id = payload.camera_id
+    cam_state = _detector.camera_states.get(cam_id) if _detector else None
+
+    if cam_state is None:
+        return JSONResponse(status_code=404,
+                            content={"error": f"Unknown camera: {cam_id}"})
+
+    # Convert external detections to internal format
+    detected_colors = set()
+    for det in payload.detections:
+        color = det.color_class
+        if color not in ALL_COLORS:
+            continue
+
+        detected_colors.add(color)
+
+        # Update camera state with external detection data
+        # update_smooth_x also marks color_last_seen internally
+        cam_state.update_smooth_x(color, det.center_x)
+        if det.speed_mps is not None:
+            cam_state.update_speed(color, det.speed_mps)
+
+    # Update horse presence
+    with state._frame_lock:
+        state.camera_horse_presence[cam_id] = detected_colors
+
+    # Merge rankings if race is active
+    if state.race_active and _detector:
+        rankings = _detector.merger.merge(
+            _detector.camera_states,
+            {},  # frame_widths not available from external ingest
+        )
+        state.set_combined_rankings(rankings)
+
+    return {"status": "ok", "camera_id": cam_id,
+            "detections_accepted": len(detected_colors)}
+
+
+@app.post("/api/alerts")
+async def send_alert_endpoint(alert: AlertItem):
+    """Broadcast a system alert to all connected WebSocket clients."""
+    msg = alert.model_dump()
+    dead = []
+    for ws in ws_clients:
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        ws_clients.discard(ws)
+    return {"status": "ok", "clients_notified": len(ws_clients)}
+
+
 # ============================================================
 # MJPEG STREAM ENDPOINT (Fallback)
 # ============================================================
@@ -1238,17 +1433,29 @@ def _get_frame_for_stream(cam_id: str) -> np.ndarray:
     return frame
 
 
-def _encode_jpeg(frame: np.ndarray) -> Optional[bytes]:
-    ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, MJPEG_QUALITY])
+def _encode_jpeg(frame: np.ndarray, quality: int = MJPEG_QUALITY) -> Optional[bytes]:
+    ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
     if not ret:
         return None
     return jpeg.tobytes()
 
 
-def mjpeg_generator(cam_id: str):
-    """Yield MJPEG frames for a specific camera (by cam_id string)."""
+def _resize_frame(frame: np.ndarray, max_width: int) -> np.ndarray:
+    """Resize frame if wider than max_width, preserving aspect ratio."""
+    h, w = frame.shape[:2]
+    if w <= max_width:
+        return frame
+    scale = max_width / w
+    new_w = max_width
+    new_h = int(h * scale)
+    return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
+async def mjpeg_generator(cam_id: str):
+    """Yield MJPEG frames for a specific camera (async, non-blocking encode)."""
     delay = 1.0 / MJPEG_FPS
     last_access_mark = 0.0
+    loop = asyncio.get_event_loop()
 
     while True:
         now = time.time()
@@ -1260,28 +1467,27 @@ def mjpeg_generator(cam_id: str):
         frame = state.get_annotated_frame(cam_id, max_age_sec=MAX_ANNOTATED_FRAME_AGE_SEC)
 
         if frame is None:
-            # Try raw frame from camera manager
             frame = camera_manager.get_frame(cam_id)
 
         if frame is None:
-            # Show placeholder
             frame = np.zeros((480, 640, 3), dtype=np.uint8)
             label = f"{cam_id} — waiting..."
             cv2.putText(frame, label, (80, 240),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
 
-        ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, MJPEG_QUALITY])
-        if not ret:
-            time.sleep(delay)
+        # Offload JPEG encoding to thread pool (prevents blocking event loop)
+        jpeg_bytes = await loop.run_in_executor(None, _encode_jpeg, frame)
+        if jpeg_bytes is None:
+            await asyncio.sleep(delay)
             continue
 
         yield (
             b"--frame\r\n"
             b"Content-Type: image/jpeg\r\n\r\n" +
-            jpeg.tobytes() +
+            jpeg_bytes +
             b"\r\n"
         )
-        time.sleep(delay)
+        await asyncio.sleep(delay)
 
 
 @app.get("/stream/cam{cam_id}")
@@ -1299,6 +1505,54 @@ async def mjpeg_stream(cam_id: str):
     )
 
 
+async def ptz_live_generator():
+    """MJPEG generator that always serves the ACTIVE PTZ camera (async).
+
+    When the operator switches PTZ cameras, the very next frame
+    comes from the new camera. The HTTP connection never breaks.
+    Public display connects once and gets seamless switching.
+
+    JPEG encoding is offloaded to a thread pool so the async event
+    loop is never blocked.
+    """
+    delay = 1.0 / MJPEG_FPS
+    loop = asyncio.get_event_loop()
+
+    while True:
+        cam_id = active_ptz_id  # Read current active PTZ (may change any time)
+
+        # Try raw frame from camera manager
+        frame = camera_manager.get_frame(cam_id)
+
+        if frame is None:
+            # No frame yet — send black frame to keep connection alive
+            frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+
+        # Offload JPEG encoding to thread pool (prevents blocking event loop)
+        jpeg_bytes = await loop.run_in_executor(None, _encode_jpeg, frame)
+        if jpeg_bytes is None:
+            await asyncio.sleep(delay)
+            continue
+
+        yield (
+            b"--frame\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n" +
+            jpeg_bytes +
+            b"\r\n"
+        )
+        await asyncio.sleep(delay)
+
+
+# IMPORTANT: ptz-live MUST be registered BEFORE the {cam_id_full} wildcard route
+@app.get("/stream/ptz-live")
+async def ptz_live_stream():
+    """Seamless PTZ stream for public display. Always shows active PTZ camera."""
+    return StreamingResponse(
+        ptz_live_generator(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
 @app.get("/stream/{cam_id_full}")
 async def mjpeg_stream_full(cam_id_full: str):
     """MJPEG stream using full cam_id (e.g. analytics-1, ptz-2)."""
@@ -1308,10 +1562,18 @@ async def mjpeg_stream_full(cam_id_full: str):
     )
 
 
-def _snapshot_response(cam_id: str) -> Response:
-    """Return a single JPEG frame for lightweight polling previews."""
+def _snapshot_response(cam_id: str, quality: int = MJPEG_QUALITY,
+                       width: Optional[int] = None) -> Response:
+    """Return a single JPEG frame for lightweight polling previews.
+
+    Args:
+        quality: JPEG quality 1-100 (default: MJPEG_QUALITY from config)
+        width: Optional max width for resize (preserves aspect ratio)
+    """
     frame = _get_frame_for_stream(cam_id)
-    jpeg_bytes = _encode_jpeg(frame)
+    if width is not None and width > 0:
+        frame = _resize_frame(frame, width)
+    jpeg_bytes = _encode_jpeg(frame, quality=quality)
     if jpeg_bytes is None:
         return Response(status_code=503)
     return Response(
@@ -1326,19 +1588,29 @@ def _snapshot_response(cam_id: str) -> Response:
 
 
 @app.get("/snapshot/cam{cam_id}")
-async def snapshot_numeric(cam_id: str):
-    """Single JPEG snapshot for numeric camera ids."""
+async def snapshot_numeric(cam_id: str, quality: int = MJPEG_QUALITY,
+                           width: Optional[int] = None):
+    """Single JPEG snapshot for numeric camera ids.
+
+    Query params: ?quality=50&width=640 for grid thumbnails.
+    """
+    quality = max(10, min(100, quality))
     if cam_id.isdigit():
         cam_id_str = f"analytics-{cam_id}"
     else:
         cam_id_str = cam_id
-    return _snapshot_response(cam_id_str)
+    return _snapshot_response(cam_id_str, quality=quality, width=width)
 
 
 @app.get("/snapshot/{cam_id_full}")
-async def snapshot_full(cam_id_full: str):
-    """Single JPEG snapshot for full camera ids."""
-    return _snapshot_response(cam_id_full)
+async def snapshot_full(cam_id_full: str, quality: int = MJPEG_QUALITY,
+                        width: Optional[int] = None):
+    """Single JPEG snapshot for full camera ids.
+
+    Query params: ?quality=50&width=640 for grid thumbnails.
+    """
+    quality = max(10, min(100, quality))
+    return _snapshot_response(cam_id_full, quality=quality, width=width)
 
 
 # ============================================================
@@ -1346,8 +1618,9 @@ async def snapshot_full(cam_id_full: str):
 # ============================================================
 
 async def ranking_broadcast_loop():
-    """Periodically broadcast ranking updates to all WebSocket clients."""
+    """Broadcast ranking updates only when positions actually change."""
     last_log_time = 0
+    last_rankings_hash = None
     while True:
         await asyncio.sleep(BROADCAST_INTERVAL)
 
@@ -1355,6 +1628,12 @@ async def ranking_broadcast_loop():
             continue
 
         rankings = state.get_combined_rankings()
+
+        # Only broadcast when ranking positions change (not every cycle)
+        current_hash = tuple((r.get("id"), r.get("position")) for r in rankings)
+        if current_hash == last_rankings_hash:
+            continue
+        last_rankings_hash = current_hash
 
         msg = {
             "type": "ranking_update",
@@ -1380,7 +1659,7 @@ async def camera_detection_broadcast_loop():
 
         # Build camera → horses map
         presence = {}
-        with state._lock:
+        with state._frame_lock:
             for cam_id, horses in state.camera_horse_presence.items():
                 if horses:
                     presence[cam_id] = list(horses)
@@ -1391,6 +1670,46 @@ async def camera_detection_broadcast_loop():
                 "cameras": presence,
             }
             await broadcast(msg)
+
+
+async def camera_status_broadcast_loop():
+    """Broadcast camera health status to all WebSocket clients (every 2 seconds)."""
+    while True:
+        await asyncio.sleep(2.0)
+
+        if not ws_clients:
+            continue
+
+        cam_status = camera_manager.get_status()
+        cameras = {}
+        for cam_id, info in cam_status.items():
+            if not isinstance(info, dict):
+                continue
+            frame_age = info.get("frameAgeSec", None)
+            cameras[cam_id] = {
+                "online": info.get("state") == "running",
+                "fps": info.get("fps", 0),
+                "latency_ms": round(frame_age * 1000, 1) if frame_age is not None else None,
+            }
+
+        if cameras:
+            msg = {
+                "type": "camera_status",
+                "cameras": cameras,
+            }
+            await broadcast(msg)
+
+
+async def alert_broadcast(alert_type: str, message: str):
+    """Send a system alert to all connected WebSocket clients."""
+    if not ws_clients:
+        return
+    msg = {
+        "type": "alert",
+        "alert_type": alert_type,
+        "message": message,
+    }
+    await broadcast(msg)
 
 
 # Register WebRTC routes
@@ -1456,6 +1775,36 @@ def main():
         RACE_STATUS = "active"
         log.info("Race auto-started")
 
+    # Graceful shutdown handler
+    import signal
+
+    def _shutdown_handler(signum, frame):
+        sig_name = signal.Signals(signum).name if hasattr(signal, 'Signals') else str(signum)
+        log.info(f"Received {sig_name}, shutting down gracefully...")
+        # Stop detection loop first (releases GPU resources)
+        if _detector:
+            _detector.stop()
+        # Stop all camera readers
+        camera_manager.stop_all()
+        # Close WebRTC connections
+        try:
+            from api.webrtc_server import peer_connections, _source_tracks
+            for pc in list(peer_connections):
+                try:
+                    import asyncio
+                    asyncio.get_event_loop().run_until_complete(pc.close())
+                except Exception:
+                    pass
+            peer_connections.clear()
+            _source_tracks.clear()
+        except Exception:
+            pass
+        log.info("Shutdown complete.")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _shutdown_handler)
+    signal.signal(signal.SIGTERM, _shutdown_handler)
+
     # Run FastAPI server
     import uvicorn
     try:
@@ -1463,7 +1812,8 @@ def main():
     finally:
         log.info("Shutting down...")
         camera_manager.stop_all()
-        _detector.stop()
+        if _detector:
+            _detector.stop()
 
 
 if __name__ == "__main__":

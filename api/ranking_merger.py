@@ -162,6 +162,8 @@ class RankingMerger:
                         tracking.completed_camera_index = min(completed_candidate, max_allowed)
                         tracking.last_checkpoint_time = now
 
+                # Distance is based ONLY on completed cameras — ranking changes
+                # only when a horse passes to the next camera, not every frame.
                 tracking.absolute_distance = min(
                     (tracking.completed_camera_index + 1) * self.CAMERA_TRACK_M,
                     self.TRACK_LENGTH,
@@ -170,28 +172,17 @@ class RankingMerger:
                 tracking.confidence = best_confidence
                 tracking.last_cam_id = best_cam.cam_id
                 tracking.last_cam_index = best_cam.cam_index
+                # local_progress used only as tiebreaker for horses at the same distance
                 tracking.local_progress = max(0.0, min(1.0, best_local_progress))
                 # Use camera's real last-detected timestamp so visibility hold
                 # is based on actual detection, not merge-loop clock.
                 tracking.last_seen_time = best_time
                 tracking.is_tracked = True
 
-                # Add in-camera progress so ranking can update continuously
-                # within the current camera segment (not only on handoff).
-                base_distance = min(
-                    max(0.0, (tracking.completed_camera_index + 1) * self.CAMERA_TRACK_M),
-                    self.TRACK_LENGTH,
-                )
-                candidate_distance = min(
-                    base_distance + tracking.local_progress * self.CAMERA_TRACK_M,
-                    self.TRACK_LENGTH,
-                )
-                # Race direction is forward; keep distance monotonic for stability.
-                tracking.absolute_distance = max(tracking.absolute_distance, candidate_distance)
-
             elif now - tracking.last_seen_time < self.GRACE_PERIOD:
                 tracking.is_tracked = True
-                tracking.speed *= 0.8
+                # Gradually decay speed (gentler than before to avoid sudden jumps)
+                tracking.speed *= 0.95
                 if abs(tracking.speed) < 0.05:
                     tracking.speed = 0.0
 
@@ -213,6 +204,7 @@ class RankingMerger:
         active.sort(
             key=lambda x: (
                 -x[1].absolute_distance,
+                -x[1].local_progress,  # within same camera: further right = ahead
                 x[1].last_checkpoint_time if x[1].last_checkpoint_time > 0 else float("inf"),
                 prev_order_idx.get(x[0], len(self.all_colors)),
             )

@@ -185,6 +185,7 @@ export const en = {
     ranking: {
         liveStandings: 'Live Standings',
         leader: 'Leader:',
+        waitingForRace: 'Waiting for race...',
     },
 
     // Stream Players

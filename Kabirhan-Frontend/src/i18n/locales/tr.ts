@@ -185,6 +185,7 @@ export const tr = {
     ranking: {
         liveStandings: 'Canlı Sıralama',
         leader: 'Lider:',
+        waitingForRace: 'Yarış bekleniyor...',
     },
 
     // Stream Players

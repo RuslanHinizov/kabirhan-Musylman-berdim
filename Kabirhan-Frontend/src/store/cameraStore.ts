@@ -22,7 +22,9 @@ interface CameraState {
     setActivePTZ: (cameraId: string) => void;
     setStreamMode: (mode: 'webrtc' | 'mjpeg') => void;
     updateCameraStatus: (cameraId: string, status: 'online' | 'offline') => void;
+    batchUpdateCameraStatuses: (updates: Record<string, 'online' | 'offline'>) => void;
     updateAnalyticsCameraHorses: (cameraId: string, horseIds: string[]) => void;
+    batchUpdateCameraHorses: (updates: Record<string, string[]>) => void;
     initializeCameras: () => void;
     syncFromStorage: () => void;
 }
@@ -79,6 +81,15 @@ export const useCameraStore = create<CameraState>((set, get) => ({
             })),
             activePTZCameraId: cameraId
         }));
+        // Notify backend so /stream/ptz-live switches instantly
+        const backendPort = 8000;
+        const host = window.location.hostname || '127.0.0.1';
+        const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+        fetch(`${protocol}//${host}:${backendPort}/api/ptz/active`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cameraId }),
+        }).catch(() => { /* ignore network errors */ });
     },
 
     setActivePTZ: (cameraId) => {
@@ -90,6 +101,15 @@ export const useCameraStore = create<CameraState>((set, get) => ({
             })),
             activePTZCameraId: cameraId
         }));
+        // Notify backend so /stream/ptz-live switches instantly
+        const backendPort = 8000;
+        const host = window.location.hostname || '127.0.0.1';
+        const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+        fetch(`${protocol}//${host}:${backendPort}/api/ptz/active`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cameraId }),
+        }).catch(() => { /* ignore network errors */ });
     },
 
     updateCameraStatus: (cameraId, status) => set((state) => ({
@@ -101,11 +121,54 @@ export const useCameraStore = create<CameraState>((set, get) => ({
         )
     })),
 
+    batchUpdateCameraStatuses: (updates) => set((state) => {
+        // Single set() call for all cameras — avoids 29 separate re-renders
+        let ptzChanged = false;
+        let analyticsChanged = false;
+        const ptzCameras = state.ptzCameras.map(cam => {
+            const newStatus = updates[cam.id];
+            if (newStatus !== undefined && cam.status !== newStatus) {
+                ptzChanged = true;
+                return { ...cam, status: newStatus };
+            }
+            return cam;
+        });
+        const analyticsCameras = state.analyticsCameras.map(cam => {
+            const newStatus = updates[cam.id];
+            if (newStatus !== undefined && cam.status !== newStatus) {
+                analyticsChanged = true;
+                return { ...cam, status: newStatus };
+            }
+            return cam;
+        });
+        // Only return new arrays if something actually changed
+        return {
+            ...(ptzChanged ? { ptzCameras } : {}),
+            ...(analyticsChanged ? { analyticsCameras } : {}),
+        };
+    }),
+
     updateAnalyticsCameraHorses: (cameraId, horseIds) => set((state) => ({
         analyticsCameras: state.analyticsCameras.map(cam =>
             cam.id === cameraId ? { ...cam, horsesInView: horseIds } : cam
         )
     })),
+
+    batchUpdateCameraHorses: (updates) => set((state) => {
+        let changed = false;
+        const analyticsCameras = state.analyticsCameras.map(cam => {
+            const newHorses = updates[cam.id];
+            if (newHorses !== undefined) {
+                const prev = cam.horsesInView;
+                if (prev.length !== newHorses.length || prev.some((h, i) => h !== newHorses[i])) {
+                    changed = true;
+                    return { ...cam, horsesInView: newHorses };
+                }
+            }
+            return cam;
+        });
+        return changed ? { analyticsCameras } : {};
+    }),
 
     initializeCameras: () => set({
         ptzCameras: createPTZCameras(),

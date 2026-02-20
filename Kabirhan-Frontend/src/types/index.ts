@@ -85,6 +85,21 @@ export interface CameraStatusUpdate {
     };
 }
 
+// Enhanced camera health info from backend camera_status broadcast
+export interface CameraHealth {
+    online: boolean;
+    fps: number;
+    latencyMs: number | null;
+    lastUpdate: number;
+}
+
+// System alert from backend
+export interface AlertMessage {
+    type: 'alert';
+    alert_type: string;   // e.g., "camera_reconnect", "gpu_overload"
+    message: string;
+}
+
 // Constants
 export const TRACK_LENGTH = 2500;
 export const PTZ_CAMERA_COUNT = 4;
